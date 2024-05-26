@@ -4,12 +4,11 @@ import re
 from datetime import datetime, timezone
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
- 
+
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
 DATABASE = 'klink.db'
-
 
 def init_db():
     with sqlite3.connect(DATABASE) as conn:

@@ -20,6 +20,7 @@
         "*.egg-info{,/**}",
         ".installed.cfg",
         "*.egg",
+        "klink.db",
         "MANIFEST",
         ".env{,/**}",
         ".venv{,/**}",
