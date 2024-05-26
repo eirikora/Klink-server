@@ -11,6 +11,7 @@ CORS(app)  # Enable CORS for all routes
 DATABASE = 'klink.db'
 
 def init_db():
+    print('INITIALIZING database!')
     with sqlite3.connect(DATABASE) as conn:
         cursor = conn.cursor()
         cursor.execute('''CREATE TABLE IF NOT EXISTS archives (
@@ -51,6 +52,8 @@ def create_archive():
 
     if not archive or not password:
         return jsonify({'error': 'Archive and password headers are required'}), 400
+    
+    print('Creating archive ' + archive + '!')
 
     hashed_password = generate_password_hash(password)
     with sqlite3.connect(DATABASE) as conn:
@@ -243,5 +246,6 @@ def delete_document():
     return jsonify({'status': 'success'})
 
 if __name__ == '__main__':
+    print('Main application starting.')
     init_db()
     app.run(debug=True)
