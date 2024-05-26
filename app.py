@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+import logging
 import sqlite3
 import re
 from datetime import datetime, timezone
@@ -11,7 +12,7 @@ CORS(app)  # Enable CORS for all routes
 DATABASE = 'klink.db'
 
 def init_db():
-    print('INITIALIZING database!')
+    logging.info('INITIALIZING database!')
     with sqlite3.connect(DATABASE) as conn:
         cursor = conn.cursor()
         cursor.execute('''CREATE TABLE IF NOT EXISTS archives (
@@ -245,7 +246,9 @@ def delete_document():
 
     return jsonify({'status': 'success'})
 
-if __name__ == '__main__':
-    print('Main application starting.')
+if __name__ == 'app':
     init_db()
+
+if __name__ == '__main__':
+    logging.info('Starting web application.')
     app.run(debug=True)
