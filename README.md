@@ -25,8 +25,8 @@ Prosjektet bruker [uv](https://github.com/astral-sh/uv) som Python package manag
 ### Klone prosjektet og sette opp miljø
 
 ```bash
-git clone <repo-url>
-cd <prosjektmappe>
+git clone https://github.com/eirikora/Klink-server
+cd Klink-server
 uv venv
 source .venv/bin/activate  # eller .venv\Scripts\activate på Windows
 uv pip install -r requirements.txt
@@ -38,7 +38,7 @@ uv pip install -r requirements.txt
 uv run main.py
 ```
 
-Dette starter serveren på `http://localhost:5000`.
+Dette starter en ny server på `http://localhost:54827`.
 
 ### Bruke API-et
 
@@ -49,7 +49,7 @@ Alle kall krever to headers:
 Eksempel med `curl` for å opprette et arkiv:
 
 ```bash
-curl -X POST http://localhost:5000/create_archive \
+curl -X POST http://localhost:54827/create_archive \
   -H "Archive: testarkiv" \
   -H "Password: hemmelig"
 ```
