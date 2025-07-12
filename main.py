@@ -2,18 +2,26 @@ from flask import Flask, request, jsonify
 import logging
 import sqlite3
 import re
+import os
 from datetime import datetime, timezone
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
+
+# Set up logging to show INFO messages in console
+logging.basicConfig(level=logging.INFO)
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
 DATABASE = 'klink.db'
 
+# Use a reusable and thread-safe connection function
+def get_db_connection():
+    return sqlite3.connect(DATABASE, timeout=10, check_same_thread=False)
+
 def init_db():
     logging.info('INITIALIZING database!')
-    with sqlite3.connect(DATABASE) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute('''CREATE TABLE IF NOT EXISTS archives (
                             name TEXT PRIMARY KEY,
@@ -37,7 +45,7 @@ def init_db():
         conn.commit()
 
 def verify_archive(archive, password):
-    with sqlite3.connect(DATABASE) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT password FROM archives WHERE name = ?", (archive,))
         result = cursor.fetchone()
@@ -47,17 +55,16 @@ def verify_archive(archive, password):
 
 @app.route('/create_archive', methods=['POST'])
 def create_archive():
-    data = request.json
     archive = request.headers.get('Archive')
     password = request.headers.get('Password')
 
     if not archive or not password:
         return jsonify({'error': 'Archive and password headers are required'}), 400
-    
-    print('Creating archive ' + archive + '!')
+
+    logging.info(f'Creating archive {archive}')
 
     hashed_password = generate_password_hash(password)
-    with sqlite3.connect(DATABASE) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("INSERT INTO archives (name, password) VALUES (?, ?)", (archive, hashed_password))
         conn.commit()
@@ -86,7 +93,6 @@ def insert_document():
     timestamp = datetime.now(timezone.utc).isoformat()
     lastupdated = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
-    # Check if name contains a path
     if '/' in name:
         additional_path, name = name.rsplit('/', 1)
         path = f"{path}/{additional_path}".strip('/')
@@ -95,13 +101,10 @@ def insert_document():
         name += '.kli'
     fullname = f"{path}/{name}".strip('/')
 
-    with sqlite3.connect(DATABASE) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
-
-        # Delete existing document links
         cursor.execute("DELETE FROM links WHERE linkfrom = ?", (fullname,))
 
-        # Insert or update the document
         cursor.execute('''INSERT INTO documents (fullname, name, path, body, lastupdated, updatedby, timestamp, archive)
                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                           ON CONFLICT(fullname, archive) DO UPDATE SET
@@ -113,7 +116,6 @@ def insert_document():
                             timestamp=excluded.timestamp''',
                        (fullname, name, path, body, lastupdated, updatedby, timestamp, archive))
 
-        # Scan the body for links
         links = re.findall(r'\[\[(.*?)\]\]', body)
         for link in links:
             if not link.lower().endswith('.kli'):
@@ -144,7 +146,7 @@ def retrieve_document():
     if not fullname.lower().endswith('.kli'):
         fullname += '.kli'
 
-    with sqlite3.connect(DATABASE) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM documents WHERE fullname = ? AND archive = ?", (fullname, archive))
         document = cursor.fetchone()
@@ -161,7 +163,6 @@ def retrieve_document():
                 'archive': document[7]
             }
 
-            # Find all links that link to this document
             cursor.execute("SELECT linkfrom FROM links WHERE linkto = ?", (fullname,))
             incoming_links = cursor.fetchall()
             incoming_links_list = [link[0] for link in incoming_links]
@@ -182,7 +183,7 @@ def list_documents():
     if not verify_archive(archive, password):
         return jsonify({'error': 'Invalid archive or password'}), 403
 
-    with sqlite3.connect(DATABASE) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT name, path, lastupdated, updatedby, timestamp FROM documents WHERE archive = ?", (archive,))
         documents = cursor.fetchall()
@@ -238,7 +239,7 @@ def delete_document():
         name += '.kli'
     fullname = f"{path}/{name}".strip('/')
 
-    with sqlite3.connect(DATABASE) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM documents WHERE fullname = ? AND archive = ?", (fullname, archive))
         cursor.execute("DELETE FROM links WHERE linkfrom = ?", (fullname,))
@@ -250,4 +251,6 @@ if __name__ == '__main__':
     logging.info('Initializing database.')
     init_db()
     logging.info('Starting web application.')
-    app.run(debug=True)
+
+    port = int(os.environ.get('KLINKPORT', 54827))
+    app.run(debug=True, threaded=True, port=port)

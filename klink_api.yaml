@@ -2,9 +2,9 @@ openapi: 3.0.3
 info:
   title: Klink API
   version: 1.0.0
-  description: API for administrasjon av dokumentarkiver med passordbeskyttelse og lenkestruktur.
+  description: API for administrasjon av dokumentarkiver med passordbeskyttelse og lenkestruktur. Sett miljøvariabel KLINKPORT for alternativ portnummer.
 servers:
-  - url: http://localhost:5000
+  - url: http://localhost:54827
 
 components:
   securitySchemes:
