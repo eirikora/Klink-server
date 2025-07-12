@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 
+# This is the code for a simple Klink server. Future versions should support more professional databases and multi-threaded servers.
+
 # Set up logging to show INFO messages in console
 logging.basicConfig(level=logging.INFO)
 
