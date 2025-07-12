@@ -246,9 +246,8 @@ def delete_document():
 
     return jsonify({'status': 'success'})
 
-if __name__ == 'app':
-    init_db()
-
 if __name__ == '__main__':
+    logging.info('Initializing database.')
+    init_db()
     logging.info('Starting web application.')
     app.run(debug=True)
