@@ -1,0 +1,159 @@
+openapi: 3.0.3
+info:
+  title: Klink API
+  version: 1.0.0
+  description: API for administrasjon av dokumentarkiver med passordbeskyttelse og lenkestruktur.
+servers:
+  - url: http://localhost:5000
+
+components:
+  securitySchemes:
+    ArchiveAuth:
+      type: apiKey
+      in: header
+      name: Archive
+    PasswordAuth:
+      type: apiKey
+      in: header
+      name: Password
+
+  schemas:
+    Document:
+      type: object
+      properties:
+        name:
+          type: string
+        path:
+          type: string
+        body:
+          type: string
+        lastupdated:
+          type: string
+        updatedby:
+          type: string
+        timestamp:
+          type: string
+    DocumentRequest:
+      type: object
+      required:
+        - name
+        - body
+      properties:
+        name:
+          type: string
+        path:
+          type: string
+        body:
+          type: string
+    DeleteDocumentRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        path:
+          type: string
+
+security:
+  - ArchiveAuth: []
+    PasswordAuth: []
+
+paths:
+  /create_archive:
+    post:
+      summary: Opprett nytt arkiv
+      requestBody:
+        required: false
+      responses:
+        '200':
+          description: Arkiv opprettet
+        '400':
+          description: Manglende header
+      security:
+        - ArchiveAuth: []
+          PasswordAuth: []
+
+  /insert:
+    post:
+      summary: Sett inn eller oppdater et dokument
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DocumentRequest'
+      responses:
+        '200':
+          description: Dokument opprettet/oppdatert
+        '400':
+          description: Ugyldig input
+        '403':
+          description: Feil arkiv/passord
+      security:
+        - ArchiveAuth: []
+          PasswordAuth: []
+
+  /retrieve:
+    get:
+      summary: Hent et dokument med full path
+      parameters:
+        - in: query
+          name: fullname
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Dokumentdata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+        '400':
+          description: Manglende parametere
+        '403':
+          description: Feil arkiv/passord
+        '404':
+          description: Dokument ikke funnet
+      security:
+        - ArchiveAuth: []
+          PasswordAuth: []
+
+  /documents:
+    get:
+      summary: List alle dokumenter i arkivet
+      responses:
+        '200':
+          description: Liste av dokumenter
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Document'
+        '403':
+          description: Feil arkiv/passord
+      security:
+        - ArchiveAuth: []
+          PasswordAuth: []
+
+  /delete_document:
+    delete:
+      summary: Slett et dokument
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteDocumentRequest'
+      responses:
+        '200':
+          description: Sletting utført
+        '400':
+          description: Ugyldig input
+        '403':
+          description: Feil arkiv/passord
+      security:
+        - ArchiveAuth: []
+          PasswordAuth: []
