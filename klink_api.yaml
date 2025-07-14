@@ -1,8 +1,12 @@
 openapi: 3.0.3
 info:
   title: Klink API
-  version: 1.0.0
-  description: API for administrasjon av dokumentarkiver med passordbeskyttelse og lenkestruktur. Sett miljøvariabel KLINKPORT for alternativ portnummer.
+  version: 1.2.0
+  description: |-
+    API for administrasjon av dokumentarkiver med passordbeskyttelse og lenkestruktur.
+    Hvert arkiv må ha en eier (e-post).
+    Serveren kan sikres med et globalt 'X-Server-Token'.
+    Sett miljøvariabel KLINKPORT for alternativ portnummer.
 servers:
   - url: http://localhost:54827
 
@@ -16,23 +20,45 @@ components:
       type: apiKey
       in: header
       name: Password
+    ServerTokenAuth:
+      type: apiKey
+      in: header
+      name: X-Server-Token
 
   schemas:
+    ArchiveInfo:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Navnet på arkivet.
+        owner:
+          type: string
+          format: email
+          description: E-postadressen til eieren av arkivet.
     Document:
       type: object
       properties:
         name:
           type: string
+          description: Dokumentets navn (f.eks. 'dokument.kli').
         path:
           type: string
+          description: Dokumentets sti (f.eks. 'mappe/undermappe').
         body:
           type: string
+          description: Innholdet i dokumentet.
         lastupdated:
           type: string
+          format: date-time
         updatedby:
           type: string
         timestamp:
           type: string
+          format: date-time
+        incominglinks:
+          type: string
+          description: En kommaseparert liste med dokumenter som lenker til dette.
     DocumentRequest:
       type: object
       required:
@@ -55,24 +81,64 @@ components:
         path:
           type: string
 
+# Global sikkerhet som gjelder for alle endepunkter med mindre de overstyrer det lokalt.
 security:
   - ArchiveAuth: []
     PasswordAuth: []
+    ServerTokenAuth: []
 
 paths:
-  /create_archive:
+  /set_server_token:
     post:
-      summary: Opprett nytt arkiv
-      requestBody:
-        required: false
+      summary: Sett server-token (engangsoperasjon)
+      description: Setter det globale server-tokenet. Kan bare kjøres én gang, når tokenet er tomt.
       responses:
         '200':
-          description: Arkiv opprettet
+          description: Server-token ble satt.
         '400':
-          description: Manglende header
+          description: Manglende X-Server-Token header.
+        '409':
+          description: Server-token er allerede satt og kan ikke endres.
       security:
-        - ArchiveAuth: []
-          PasswordAuth: []
+        - ServerTokenAuth: [] # Krever kun token for å sette seg selv
+
+  /list_archives:
+    get:
+      summary: List alle tilgjengelige arkiver med eiere
+      description: Returnerer en liste over alle arkiver med tilhørende eier. Krever ingen autentisering.
+      responses:
+        '200':
+          description: En liste med arkiv-objekter (navn og eier).
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ArchiveInfo'
+        '500':
+          description: Intern serverfeil ved henting av arkiver.
+      security: [] # Ingen sikkerhet, dette er et offentlig endepunkt.
+
+  /create_archive:
+    post:
+      summary: Opprett nytt arkiv med en eier
+      parameters:
+        - in: header
+          name: Owner-Email
+          required: true
+          schema:
+            type: string
+            format: email
+          description: En gyldig e-postadresse for arkivets eier.
+      responses:
+        '200':
+          description: Arkiv opprettet.
+        '400':
+          description: Manglende eller ugyldig header (Archive, Password, eller Owner-Email).
+        '401':
+          description: Uautorisert. Manglende eller ugyldig server-token.
+        '409':
+          description: Et arkiv med dette navnet finnes allerede.
 
   /insert:
     post:
@@ -88,11 +154,10 @@ paths:
           description: Dokument opprettet/oppdatert
         '400':
           description: Ugyldig input
+        '401':
+          description: Uautorisert. Manglende eller ugyldig server-token.
         '403':
           description: Feil arkiv/passord
-      security:
-        - ArchiveAuth: []
-          PasswordAuth: []
 
   /retrieve:
     get:
@@ -112,13 +177,12 @@ paths:
                 $ref: '#/components/schemas/Document'
         '400':
           description: Manglende parametere
+        '401':
+          description: Uautorisert. Manglende eller ugyldig server-token.
         '403':
           description: Feil arkiv/passord
         '404':
           description: Dokument ikke funnet
-      security:
-        - ArchiveAuth: []
-          PasswordAuth: []
 
   /documents:
     get:
@@ -132,11 +196,10 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Document'
+        '401':
+          description: Uautorisert. Manglende eller ugyldig server-token.
         '403':
           description: Feil arkiv/passord
-      security:
-        - ArchiveAuth: []
-          PasswordAuth: []
 
   /delete_document:
     delete:
@@ -152,8 +215,7 @@ paths:
           description: Sletting utført
         '400':
           description: Ugyldig input
+        '401':
+          description: Uautorisert. Manglende eller ugyldig server-token.
         '403':
           description: Feil arkiv/passord
-      security:
-        - ArchiveAuth: []
-          PasswordAuth: []

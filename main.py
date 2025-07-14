@@ -17,6 +17,10 @@ CORS(app)  # Enable CORS for all routes
 
 DATABASE = 'klink.db'
 
+# --- EMAIL REGEX FOR VALIDATION ---
+# A simple regex to validate email format.
+EMAIL_REGEX = re.compile(r'[^@]+@[^@]+\.[^@]+')
+
 # Use a reusable and thread-safe connection function
 def get_db_connection():
     return sqlite3.connect(DATABASE, timeout=10, check_same_thread=False)
@@ -25,9 +29,11 @@ def init_db():
     logging.info('INITIALIZING database!')
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        # ### ENDRING HER: Lagt til 'owner' kolonne i 'archives' tabellen ###
         cursor.execute('''CREATE TABLE IF NOT EXISTS archives (
                             name TEXT PRIMARY KEY,
-                            password TEXT)''')
+                            password TEXT NOT NULL,
+                            owner TEXT NOT NULL)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS documents (
                             fullname TEXT,
                             name TEXT,
@@ -44,7 +50,53 @@ def init_db():
                             linkfrom TEXT,
                             linkto TEXT,
                             linkclass TEXT)''')
+        
+        # This part for server_config and token remains unchanged
+        cursor.execute('''CREATE TABLE IF NOT EXISTS server_config (
+                            key TEXT PRIMARY KEY,
+                            value TEXT)''')
+        cursor.execute("INSERT OR IGNORE INTO server_config (key, value) VALUES ('server_token', '')")
+        
         conn.commit()
+
+# This part for token check remains unchanged
+@app.before_request
+def check_server_token():
+    if request.endpoint in ['set_server_token', 'static']: # Exclude static endpoint for safety
+        return
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM server_config WHERE key = 'server_token'")
+        result = cursor.fetchone()
+    server_token = result[0] if result else ''
+
+    if server_token:
+        request_token = request.headers.get('X-Server-Token')
+        if not request_token or request_token != server_token:
+            return jsonify({'error': 'Unauthorized: Missing or invalid X-Server-Token'}), 401
+
+# This part for setting token remains unchanged
+@app.route('/set_server_token', methods=['POST'])
+def set_server_token():
+    new_token = request.headers.get('X-Server-Token')
+    if not new_token:
+        return jsonify({'error': 'X-Server-Token header is required'}), 400
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM server_config WHERE key = 'server_token'")
+        current_token = cursor.fetchone()[0]
+
+        if current_token:
+            return jsonify({'error': 'Server token is already set and cannot be changed.'}), 409
+
+        cursor.execute("UPDATE server_config SET value = ? WHERE key = 'server_token'", (new_token,))
+        conn.commit()
+    
+    logging.info('Server token has been set.')
+    return jsonify({'status': 'success', 'message': 'Server token has been set successfully.'})
+
 
 def verify_archive(archive, password):
     with get_db_connection() as conn:
@@ -55,23 +107,52 @@ def verify_archive(archive, password):
             return True
     return False
 
+# ### ENDRING HER: /create_archive krever nå 'Owner-Email' header ###
 @app.route('/create_archive', methods=['POST'])
 def create_archive():
     archive = request.headers.get('Archive')
     password = request.headers.get('Password')
+    owner_email = request.headers.get('Owner-Email') # Ny header
 
     if not archive or not password:
         return jsonify({'error': 'Archive and password headers are required'}), 400
+    
+    # Validering av e-post
+    if not owner_email or not EMAIL_REGEX.match(owner_email):
+        return jsonify({'error': 'A valid Owner-Email header is required'}), 400
 
-    logging.info(f'Creating archive {archive}')
+    logging.info(f'Creating archive {archive} for owner {owner_email}')
 
     hashed_password = generate_password_hash(password)
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO archives (name, password) VALUES (?, ?)", (archive, hashed_password))
-        conn.commit()
+        try:
+            # Oppdatert INSERT for å inkludere eier
+            cursor.execute("INSERT INTO archives (name, password, owner) VALUES (?, ?, ?)", (archive, hashed_password, owner_email))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            return jsonify({'error': f'Archive with name {archive} already exists'}), 409
 
     return jsonify({'status': 'success'})
+
+# ### ENDRING HER: /list_archives returnerer nå navn og eier ###
+@app.route('/list_archives', methods=['GET'])
+def list_archives():
+    """Returns a sorted list of all archives with their owners."""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            # Oppdatert SELECT for å hente navn og eier
+            cursor.execute("SELECT name, owner FROM archives ORDER BY name")
+            archives = cursor.fetchall()
+        
+        # Lag en liste med objekter som inneholder navn og eier
+        archive_list = [{'name': name, 'owner': owner} for name, owner in archives]
+        return jsonify(archive_list)
+    except Exception as e:
+        logging.error(f"Error fetching archives: {e}")
+        return jsonify({'error': 'Could not retrieve archives from the database'}), 500
+
 
 @app.route('/insert', methods=['POST'])
 def insert_document():
@@ -232,7 +313,6 @@ def delete_document():
     name = data['name'].strip().lstrip('/')
     path = data.get('path', '').strip().lstrip('/')
 
-    # Check if name contains a path
     if '/' in name:
         additional_path, name = name.rsplit('/', 1)
         path = f"{path}/{additional_path}".strip('/')
@@ -250,6 +330,11 @@ def delete_document():
     return jsonify({'status': 'success'})
 
 if __name__ == '__main__':
+    # Slett den gamle databasen for å sikre at det nye skjemaet blir brukt
+    if os.path.exists(DATABASE):
+        logging.warning(f'Deleting existing database {DATABASE} to apply new schema.')
+        os.remove(DATABASE)
+
     logging.info('Initializing database.')
     init_db()
     logging.info('Starting web application.')
