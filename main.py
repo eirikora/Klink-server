@@ -329,7 +329,7 @@ def delete_document():
 
     return jsonify({'status': 'success'})
 
-# Initialiser databasen ved oppstart
+# Initialiser databasen ved oppstarten
 logging.info('Initializing database.')
 init_db()
 
