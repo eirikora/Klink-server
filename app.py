@@ -337,6 +337,85 @@ def delete_document():
 
     return jsonify({'status': 'success'})
 
+@app.route('/rename_document', methods=['POST'])
+def rename_document():
+    archive = request.headers.get('Archive')
+    password = request.headers.get('Password')
+
+    if not archive or not password:
+        return jsonify({'error': 'Archive and password headers are required'}), 400
+    if not verify_archive(archive, password):
+        return jsonify({'error': 'Invalid archive or password'}), 403
+    
+    data = request.get_json()
+    if not data or 'oldFullname' not in data or 'newFullname' not in data:
+        return jsonify({'error': 'Request body must contain oldFullname and newFullname'}), 400
+    
+    old_fullname = data['oldFullname']
+    new_fullname = data['newFullname']
+
+    if old_fullname.lower() == new_fullname.lower():
+        return jsonify({'error': 'Old and new names cannot be the same'}), 400
+
+    old_base_name = old_fullname.lower().removesuffix('.kli')
+    ### ENDRING 1: Lag en versjon av det nye navnet uten .kli for bruk i lenker ###
+    new_base_name_for_link = new_fullname.removesuffix('.kli')
+
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            # 1. Sjekk at det gamle dokumentet finnes
+            cursor.execute("SELECT 1 FROM documents WHERE fullname = ? AND archive = ?", (old_fullname, archive))
+            if not cursor.fetchone():
+                return jsonify({'error': f'Document "{old_fullname}" not found'}), 404
+
+            # 2. Sjekk at det nye navnet er ledig
+            cursor.execute("SELECT 1 FROM documents WHERE fullname = ? AND archive = ?", (new_fullname, archive))
+            if cursor.fetchone():
+                return jsonify({'error': f'Document name "{new_fullname}" already exists'}), 409
+
+            # 3. Oppdater hoveddokumentet
+            new_path, new_name = os.path.split(new_fullname)
+            timestamp = datetime.now(timezone.utc).isoformat()
+            lastupdated = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+            cursor.execute("""
+                UPDATE documents SET fullname = ?, name = ?, path = ?, lastupdated = ?, timestamp = ?
+                WHERE fullname = ? AND archive = ?
+            """, (new_fullname, new_name, new_path, lastupdated, timestamp, old_fullname, archive))
+
+            # 4. Oppdater 'links'-tabellen
+            cursor.execute("UPDATE links SET linkfrom = ? WHERE linkfrom = ?", (new_fullname, old_fullname))
+            cursor.execute("UPDATE links SET linkto = ? WHERE linkto = ?", (new_fullname, old_fullname))
+
+            # 5. Finn og oppdater alle dokumenter som inneholder den gamle lenken
+            docs_to_scan = cursor.execute(
+                "SELECT fullname, body FROM documents WHERE archive = ?", (archive,)
+            ).fetchall()
+
+            def replacer(match):
+                link_content = match.group(1)
+                normalized_link = link_content.lower().removesuffix('.kli')
+                
+                if normalized_link == old_base_name:
+                    ### ENDRING 2: Bruk det nye navnet UTEN .kli i den oppdaterte lenken ###
+                    return f'[[{new_base_name_for_link}]]'
+                else:
+                    return match.group(0)
+
+            for doc_fullname, body in docs_to_scan:
+                new_body = re.sub(r'\[\[(.*?)\]\]', replacer, body)
+                
+                if new_body != body:
+                    cursor.execute("UPDATE documents SET body = ? WHERE fullname = ? AND archive = ?", (new_body, doc_fullname, archive))
+                    logging.info(f"Updated link in document body of '{doc_fullname}'")
+        
+        return jsonify({'status': 'success', 'message': f'Document successfully renamed to {new_fullname}'})
+
+    except Exception as e:
+        logging.error(f"An error occurred during rename operation: {e}")
+        return jsonify({'error': 'An internal error occurred. The rename operation was rolled back.'}), 500
+    
 def set_server_token_on_startup(token):
     """Overwrites the server token in the database."""
     logging.info(f"Overwriting server token with provided startup token.")
