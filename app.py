@@ -62,6 +62,10 @@ def init_db():
 # This part for token check remains unchanged
 @app.before_request
 def check_server_token():
+    # 1. Tillat ALLTID OPTIONS-kall å passere for CORS
+    if request.method == 'OPTIONS':
+        return
+    
     if request.endpoint in ['set_server_token', 'static']: # Exclude static endpoint for safety
         return
 
