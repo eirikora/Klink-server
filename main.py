@@ -329,15 +329,11 @@ def delete_document():
 
     return jsonify({'status': 'success'})
 
+# Initialiser databasen ved oppstart
+logging.info('Initializing database.')
+init_db()
+
 if __name__ == '__main__':
-    # Slett den gamle databasen for å sikre at det nye skjemaet blir brukt
-    if os.path.exists(DATABASE):
-        logging.warning(f'Deleting existing database {DATABASE} to apply new schema.')
-        os.remove(DATABASE)
-
-    logging.info('Initializing database.')
-    init_db()
     logging.info('Starting web application.')
-
     port = int(os.environ.get('KLINKPORT', 54827))
     app.run(debug=True, threaded=True, port=port)
