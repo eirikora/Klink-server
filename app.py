@@ -3,14 +3,14 @@ import logging
 import sqlite3
 import re
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # This is the code for a simple Klink server. Future versions should support more professional databases and multi-threaded servers.
 
 # Set up logging to show INFO messages in console
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.WARNING)
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -183,6 +183,7 @@ def insert_document():
     updatedby = 'defaultuser'
     timestamp = datetime.now(timezone.utc).isoformat()
     lastupdated = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    logging.info("INSERTING %s:%s", name, body)
 
     if '/' in name:
         additional_path, name = name.rsplit('/', 1)
@@ -263,6 +264,7 @@ def retrieve_document():
         else:
             return jsonify({'error': 'Document not found'}), 404
 
+# ERSTATT DEN GAMLE FUNKSJONEN MED DENNE:
 @app.route('/documents', methods=['GET'])
 def list_documents():
     archive = request.headers.get('Archive')
@@ -274,22 +276,46 @@ def list_documents():
     if not verify_archive(archive, password):
         return jsonify({'error': 'Invalid archive or password'}), 403
 
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT name, path, lastupdated, updatedby, timestamp FROM documents WHERE archive = ?", (archive,))
-        documents = cursor.fetchall()
+    # Hent det valgfrie timestamp-parameteret
+    since_timestamp_str = request.args.get('sincetimestamp')
 
-    # Separate documents with empty path and non-empty path
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Bygg SQL-spørringen dynamisk
+            sql_query = "SELECT name, path, lastupdated, updatedby, timestamp FROM documents WHERE archive = ?"
+            params = [archive]
+
+            # Hvis parameteret er gitt, legg til filtrering
+            if since_timestamp_str:
+                # Konverter ISO-timestamp string til et datetime-objekt
+                # .replace('Z', '+00:00') gjør den mer robust
+                parsed_timestamp = datetime.fromisoformat(since_timestamp_str.replace('Z', '+00:00'))
+                
+                # Trekk fra 3 sekunder
+                target_time = parsed_timestamp - timedelta(seconds=3)
+                
+                # Formater for sammenligning med 'lastupdated'-formatet i databasen
+                target_time_str = target_time.strftime('%Y-%m-%d %H:%M:%S')
+
+                sql_query += " AND lastupdated > ?"
+                params.append(target_time_str)
+
+            cursor.execute(sql_query, params)
+            documents = cursor.fetchall()
+
+    except ValueError:
+        return jsonify({'error': 'Invalid sincetimestamp format. Please use ISO 8601 format.'}), 400
+    except Exception as e:
+        logging.error(f"Error listing documents: {e}")
+        return jsonify({'error': 'An internal server error occurred.'}), 500
+
+    # Sortering forblir den samme
     empty_path_docs = [doc for doc in documents if doc[1] == '']
     non_empty_path_docs = [doc for doc in documents if doc[1] != '']
-
-    # Sort non-empty path documents by path and name alphabetically
     non_empty_path_docs.sort(key=lambda x: (x[1], x[0]))
-
-    # Sort empty path documents by name alphabetically
     empty_path_docs.sort(key=lambda x: x[0])
-
-    # Combine the sorted lists, empty path documents first
     sorted_documents = empty_path_docs + non_empty_path_docs
 
     doc_list = []
