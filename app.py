@@ -26,7 +26,6 @@ def get_db_connection():
     return sqlite3.connect(DATABASE, timeout=10, check_same_thread=False)
 
 def init_db():
-    logging.info('INITIALIZING database!')
     with get_db_connection() as conn:
         cursor = conn.cursor()
         # ### ENDRING HER: Lagt til 'owner' kolonne i 'archives' tabellen ###
@@ -58,6 +57,11 @@ def init_db():
         cursor.execute("INSERT OR IGNORE INTO server_config (key, value) VALUES ('server_token', '')")
         
         conn.commit()
+
+        env_var_token = os.environ.get('KLINKTOKEN')
+        if env_var_token:
+            logging.info("Found KLINKTOKEN environment variable and setting servertoken.")
+            set_server_token_on_startup(env_var_token)
 
 # This part for token check remains unchanged
 @app.before_request
@@ -332,6 +336,16 @@ def delete_document():
         conn.commit()
 
     return jsonify({'status': 'success'})
+
+def set_server_token_on_startup(token):
+    """Overwrites the server token in the database."""
+    logging.info(f"Overwriting server token with provided startup token.")
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''INSERT INTO server_config (key, value) VALUES ('server_token', ?)
+                          ON CONFLICT(key) DO UPDATE SET value=excluded.value''', (token,))
+        conn.commit()
+    logging.info("Server token has been set. ✅")
 
 # Initialiser databasen ved oppstarten
 logging.info('Initializing database.')
