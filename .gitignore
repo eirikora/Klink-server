@@ -1,5 +1,6 @@
 # Ignore the database
 klink.db
+mindmesh.db
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

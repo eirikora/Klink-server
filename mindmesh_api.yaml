@@ -1,12 +1,12 @@
 openapi: 3.0.3
 info:
-  title: Klink API
+  title: Mindmesh API
   version: 1.3.0
   description: |-
     API for administrasjon av dokumentarkiver med passordbeskyttelse og lenkestruktur.
     Hvert arkiv må ha en eier (e-post).
     Serveren kan sikres med et globalt 'X-Server-Token'.
-    Sett miljøvariabel KLINKPORT for alternativ portnummer.
+    Sett miljøvariabel PORT for alternativ portnummer.
 servers:
   - url: http://localhost:54827
 

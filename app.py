@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# This is the code for a simple Klink server. Future versions should support more professional databases and multi-threaded servers.
+# This is the code for a simple Mindmesh server. Future versions should support more professional databases and multi-threaded servers.
 
 # Set up logging to show INFO messages in console
 logging.basicConfig(level=logging.WARNING)
@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.WARNING)
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
-DATABASE = 'klink.db'
+DATABASE = 'mindmesh.db'
 
 # --- EMAIL REGEX FOR VALIDATION ---
 # A simple regex to validate email format.
@@ -58,9 +58,9 @@ def init_db():
         
         conn.commit()
 
-        env_var_token = os.environ.get('KLINKTOKEN')
+        env_var_token = os.environ.get('SERVERTOKEN')
         if env_var_token:
-            logging.info("Found KLINKTOKEN environment variable and setting servertoken.")
+            logging.info("Found SERVERTOKEN environment variable and setting servertoken.")
             set_server_token_on_startup(env_var_token)
 
 # This part for token check remains unchanged
