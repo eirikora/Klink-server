@@ -1,6 +1,6 @@
-# Klink Server (Knowledge-link)
+# Mindmesh Server
 
-Dette er en enkel Flask-basert backend for **Klink (Knowledge-link)** – et klient-server-system hvor brukere kan lagre, hente, oppdatere og slette dokumenter i et arkiv. Systemet bruker SQLite som database og baserer seg på autentisering gjennom header-baserte arkivnavn og passord.
+Dette er en enkel Flask-basert backend for **Mindmesh** – et klient-server-system hvor brukere kan lagre, hente, oppdatere og slette dokumenter i et arkiv. Systemet bruker SQLite som database og baserer seg på autentisering gjennom header-baserte arkivnavn og passord.
 
 ## Funksjonalitet
 
@@ -25,8 +25,8 @@ Prosjektet bruker [uv](https://github.com/astral-sh/uv) som Python package manag
 ### Klone prosjektet og sette opp miljø
 
 ```bash
-git clone https://github.com/eirikora/Klink-server
-cd Klink-server
+git clone https://github.com/eirikora/mindmesh-server
+cd mindmesh-server
 uv venv
 source .venv/bin/activate  # eller .venv\Scripts\activate på Windows
 uv pip install -r requirements.txt
@@ -56,8 +56,8 @@ curl -X POST http://localhost:54827/create_archive \
 
 ## API-dokumentasjon
 
-OpenAPI-spesifikasjonen finnes i filen [klink_api.yaml](./klink_api.yaml). Du kan åpne den i Swagger Editor på [https://editor.swagger.io](https://editor.swagger.io) for en interaktiv dokumentasjon.
+OpenAPI-spesifikasjonen finnes i filen [mindmesh_api.yaml](./mindmesh_api.yaml). Du kan åpne den i Swagger Editor på [https://editor.swagger.io](https://editor.swagger.io) for en interaktiv dokumentasjon.
 
 ---
 
-© 2025 Klink Project – Eirik Øra
+© 2025 Mindmesh Project – Eirik Øra
