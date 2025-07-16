@@ -16,6 +16,7 @@ app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
 DATABASE = 'mindmesh.db'
+LOG_FILE = 'mindmesh_command_log.jsonl'
 
 # --- EMAIL REGEX FOR VALIDATION ---
 # A simple regex to validate email format.
@@ -24,6 +25,16 @@ EMAIL_REGEX = re.compile(r'[^@]+@[^@]+\.[^@]+')
 # Use a reusable and thread-safe connection function
 def get_db_connection():
     return sqlite3.connect(DATABASE, timeout=10, check_same_thread=False)
+    
+def set_server_token_on_startup(token):
+    """Overwrites the server token in the database."""
+    logging.info(f"Overwriting server token with provided startup token.")
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''INSERT INTO server_config (key, value) VALUES ('server_token', ?)
+                          ON CONFLICT(key) DO UPDATE SET value=excluded.value''', (token,))
+        conn.commit()
+    logging.info("Server token has been set. ✅")
 
 def init_db():
     with get_db_connection() as conn:
@@ -63,7 +74,24 @@ def init_db():
             logging.info("Found SERVERTOKEN environment variable and setting servertoken.")
             set_server_token_on_startup(env_var_token)
 
-# This part for token check remains unchanged
+# Funksjon for å persistere hver database-operasjon
+def log_operation(operation: str, payload: dict):
+    """Skriver en operasjon til den sentrale kommando-loggen."""
+    import json # Importeres her for å unngå sirkulære avhengigheter om nødvendig
+    
+    log_entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "operation": operation,
+        "payload": payload
+    }
+    try:
+        # Åpne filen i append-modus ('a') og skriv den nye logglinjen
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+    except Exception as e:
+        logging.error(f"CRITICAL: Failed to write to command log: {e}")
+
+# Sjekk at servertoken en riktig nøkkel for denne databasen (sikrer aksess)
 @app.before_request
 def check_server_token():
     # 1. Tillat ALLTID OPTIONS-kall å passere for CORS
@@ -84,7 +112,7 @@ def check_server_token():
         if not request_token or request_token != server_token:
             return jsonify({'error': 'Unauthorized: Missing or invalid X-Server-Token'}), 401
 
-# This part for setting token remains unchanged
+# Sett servertoken. Kan bare gjøres dersom servertoken er ""
 @app.route('/set_server_token', methods=['POST'])
 def set_server_token():
     new_token = request.headers.get('X-Server-Token')
@@ -105,7 +133,7 @@ def set_server_token():
     logging.info('Server token has been set.')
     return jsonify({'status': 'success', 'message': 'Server token has been set successfully.'})
 
-
+# Sjekk at passordet er riktig for dette arkivet
 def verify_archive(archive, password):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -115,7 +143,7 @@ def verify_archive(archive, password):
             return True
     return False
 
-# ### ENDRING HER: /create_archive krever nå 'Owner-Email' header ###
+# Skap et nytt arkiv
 @app.route('/create_archive', methods=['POST'])
 def create_archive():
     archive = request.headers.get('Archive')
@@ -143,7 +171,7 @@ def create_archive():
 
     return jsonify({'status': 'success'})
 
-# ### ENDRING HER: /list_archives returnerer nå navn og eier ###
+# Returner en liste over alle arkiv i databasen
 @app.route('/list_archives', methods=['GET'])
 def list_archives():
     """Returns a sorted list of all archives with their owners."""
@@ -161,7 +189,7 @@ def list_archives():
         logging.error(f"Error fetching archives: {e}")
         return jsonify({'error': 'Could not retrieve archives from the database'}), 500
 
-
+# Sett inn eller oppdater (UPSERT) et dokument i et arkiv. Navnet er nøkkelen
 @app.route('/insert', methods=['POST'])
 def insert_document():
     data = request.json
@@ -219,6 +247,7 @@ def insert_document():
 
     return jsonify({'status': 'success'})
 
+# Hent et dokument fra et arkiv
 @app.route('/retrieve', methods=['GET'])
 def retrieve_document():
     archive = request.headers.get('Archive')
@@ -264,20 +293,19 @@ def retrieve_document():
         else:
             return jsonify({'error': 'Document not found'}), 404
 
-# ERSTATT DEN GAMLE FUNKSJONEN MED DENNE:
+# Return list of all documetns in an archive 
 @app.route('/documents', methods=['GET'])
 def list_documents():
     archive = request.headers.get('Archive')
     password = request.headers.get('Password')
+    # Valgfritt parameter. Vil kun hente dokumenter oppdatert siden tidspunkt (med lastupdated > sincetimestamp)
+    since_timestamp_str = request.args.get('sincetimestamp')
 
     if not archive or not password:
         return jsonify({'error': 'Archive and password headers are required'}), 400
 
     if not verify_archive(archive, password):
         return jsonify({'error': 'Invalid archive or password'}), 403
-
-    # Hent det valgfrie timestamp-parameteret
-    since_timestamp_str = request.args.get('sincetimestamp')
 
     try:
         with get_db_connection() as conn:
@@ -329,6 +357,7 @@ def list_documents():
         })
     return jsonify(doc_list)
 
+# Slett et dokument
 @app.route('/delete_document', methods=['DELETE'])
 def delete_document():
     data = request.json
@@ -363,6 +392,7 @@ def delete_document():
 
     return jsonify({'status': 'success'})
 
+# Endre navnet på et dokument (og juster alle referanser til dokumentet i andre dokumenter)
 @app.route('/rename_document', methods=['POST'])
 def rename_document():
     archive = request.headers.get('Archive')
@@ -441,16 +471,6 @@ def rename_document():
     except Exception as e:
         logging.error(f"An error occurred during rename operation: {e}")
         return jsonify({'error': 'An internal error occurred. The rename operation was rolled back.'}), 500
-    
-def set_server_token_on_startup(token):
-    """Overwrites the server token in the database."""
-    logging.info(f"Overwriting server token with provided startup token.")
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''INSERT INTO server_config (key, value) VALUES ('server_token', ?)
-                          ON CONFLICT(key) DO UPDATE SET value=excluded.value''', (token,))
-        conn.commit()
-    logging.info("Server token has been set. ✅")
 
 # Initialiser databasen ved oppstarten
 logging.info('Initializing database.')
