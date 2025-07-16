@@ -2,6 +2,7 @@
 klink.db
 mindmesh.db
 mindmesh_command_log.jsonl
+backup_*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
