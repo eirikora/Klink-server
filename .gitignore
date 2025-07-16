@@ -1,6 +1,7 @@
-# Ignore the database
+# Ignore the database and its log
 klink.db
 mindmesh.db
+mindmesh_command_log.jsonl
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -138,3 +139,4 @@ __queuestorage__
 __azurite_db*__.json
 .python_packages
 klinkve
+

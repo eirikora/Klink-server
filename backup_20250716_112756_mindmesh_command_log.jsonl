@@ -1,0 +1,21 @@
+{"timestamp": "2025-07-16T08:23:19.639466+00:00", "operation": "create_archive", "payload": {"archive": "Eirik", "owner": "eirik.ora@gmail.com", "password_hash": "scrypt:32768:8:1$PvVrBQse9kpbpIi9$081d80c248c25a41a8e341c791b20671d75936f5061aadcf6a64ee73ccfb28d194c457b88fa5e349a504f6880d06f53def8b31380a6332d665568f1f5a2b01fb"}}
+{"timestamp": "2025-07-16T08:26:46.680238+00:00", "operation": "insert_document", "payload": {"archive": "Eirik", "fullname": "Eirik Y. Øra.kli", "body": "# Eirik Y. Øra\n\n"}}
+{"timestamp": "2025-07-16T08:27:06.122750+00:00", "operation": "insert_document", "payload": {"archive": "Eirik", "fullname": "Eirik Y. Øra.kli", "body": "# Eirik Y. Øra\n\nHer er dokument om Eirik som er gift med [[Pim]]"}}
+{"timestamp": "2025-07-16T08:27:07.559096+00:00", "operation": "insert_document", "payload": {"archive": "Eirik", "fullname": "Pim.kli", "body": ""}}
+{"timestamp": "2025-07-16T08:27:07.628718+00:00", "operation": "insert_document", "payload": {"archive": "Eirik", "fullname": "Eirik Y. Øra.kli", "body": "# Eirik Y. Øra\n\nHer er dokument om Eirik som er gift med [[Pim]]"}}
+{"timestamp": "2025-07-16T08:27:26.308201+00:00", "operation": "insert_document", "payload": {"archive": "Eirik", "fullname": "Pim.kli", "body": "# Pim\n\nHun er kona til [[Eirik Y. Øra]]"}}
+{"timestamp": "2025-07-16T08:29:22.100015+00:00", "operation": "insert_document", "payload": {"archive": "Eirik", "fullname": "Pim.kli", "body": "# Pim\n\nHun er kona til [[Eirik Y. Øra]]"}}
+{"timestamp": "2025-07-16T08:30:41.291064+00:00", "operation": "insert_document", "payload": {"archive": "Eirik", "fullname": "Eirik Y. Øra.kli", "body": "# Eirik Y. Øra\n\nHer er dokument om Eirik som er gift med [[Pim]]\nEirik har en hund som heter [[Dino]]"}}
+{"timestamp": "2025-07-16T08:30:52.229075+00:00", "operation": "insert_document", "payload": {"archive": "Eirik", "fullname": "Dino.kli", "body": ""}}
+{"timestamp": "2025-07-16T08:30:52.295031+00:00", "operation": "insert_document", "payload": {"archive": "Eirik", "fullname": "Eirik Y. Øra.kli", "body": "# Eirik Y. Øra\n\nHer er dokument om Eirik som er gift med [[Pim]]\nEirik har en hund som heter [[Dino]]"}}
+{"timestamp": "2025-07-16T08:31:03.180275+00:00", "operation": "insert_document", "payload": {"archive": "Eirik", "fullname": "Dino.kli", "body": "Dino er snill"}}
+{"timestamp": "2025-07-16T08:31:06.883736+00:00", "operation": "insert_document", "payload": {"archive": "Eirik", "fullname": "Dino.kli", "body": "Dino er snill"}}
+{"timestamp": "2025-07-16T08:32:31.362513+00:00", "operation": "delete_document", "payload": {"archive": "Eirik", "fullname": "Pim.kli"}}
+{"timestamp": "2025-07-16T08:32:37.011585+00:00", "operation": "insert_document", "payload": {"archive": "Eirik", "fullname": "Pim.kli", "body": ""}}
+{"timestamp": "2025-07-16T08:32:55.353280+00:00", "operation": "insert_document", "payload": {"archive": "Eirik", "fullname": "Pim.kli", "body": "Her er nytt dok om Pim som er så glad i [[Dino]]"}}
+{"timestamp": "2025-07-16T08:33:26.565367+00:00", "operation": "insert_document", "payload": {"archive": "Eirik", "fullname": "Pim.kli", "body": "Her er nytt dok om Pim som er så glad i [[Dino]]"}}
+{"timestamp": "2025-07-16T08:33:34.018792+00:00", "operation": "rename_document", "payload": {"archive": "Eirik", "oldFullname": "Dino.kli", "newFullname": "Dino Øra.kli"}}
+{"timestamp": "2025-07-16T08:33:34.200482+00:00", "operation": "insert_document", "payload": {"archive": "Eirik", "fullname": "Dino.kli", "body": ""}}
+{"timestamp": "2025-07-16T08:34:16.168703+00:00", "operation": "delete_document", "payload": {"archive": "Eirik", "fullname": "Dino.kli"}}
+{"timestamp": "2025-07-16T08:34:16.339901+00:00", "operation": "insert_document", "payload": {"archive": "Eirik", "fullname": "Dino Øra.kli", "body": ""}}
+{"timestamp": "2025-07-16T09:24:48.937793+00:00", "operation": "insert_document", "payload": {"archive": "Eirik", "fullname": "Dino Øra.kli", "body": "Dino er glad i [[Pim]]"}}
