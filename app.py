@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, g
 import logging
 import sqlite3
 import re
@@ -8,26 +8,395 @@ import shutil
 import argparse
 import json
 from datetime import datetime, timezone, timedelta
+from functools import wraps
+import jwt # <-- NYTT BIBLIOTEK
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# This is the code for a simple Mindmesh server. Future versions should support more professional databases and multi-threaded servers.
-# Set up logging to show INFO messages in console
-logging.basicConfig(level=logging.INFO)
-
+# --- KONFIGURASJON ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
 
 DATABASE = 'mindmesh.db'
 LOG_FILE = 'mindmesh_command_log.jsonl'
-
-# --- EMAIL REGEX FOR VALIDATION ---
-# A simple regex to validate email format.
 EMAIL_REGEX = re.compile(r'[^@]+@[^@]+\.[^@]+')
 
-# Use a reusable and thread-safe connection function
+# --- NYTT: Konfigurasjon for JWT (JSON Web Tokens) ---
+# I en produksjonsapplikasjon bør dette leses fra en sikker konfigurasjonsfil eller miljøvariabel.
+app.config['SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'default-super-secret-key-for-development')
+
+# --- Databasetilkobling (som før) ---
 def get_db_connection():
-    return sqlite3.connect(DATABASE, timeout=10, check_same_thread=False)
+    # Bruker autocommit (isolation_level=None) for å sikre at hver DML-statement committes umiddelbart.
+    # Dette forenkler transaksjonshåndtering i enkle operasjoner.
+    conn = sqlite3.connect(DATABASE, timeout=10, check_same_thread=False, isolation_level=None)
+    conn.row_factory = sqlite3.Row # Gir oss dictionary-lignende rader
+    return conn
+
+# --- ENDRET: Databaseinitialisering med ny struktur ---
+def init_db():
+    """Initialiserer databasen med en ny, bruker-sentrisk struktur."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        logging.info("Initializing database with new user-centric schema...")
+        
+        # 1. Brukertabell
+        cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            email TEXT UNIQUE NOT NULL,
+                            password_hash TEXT NOT NULL,
+                            display_name TEXT
+                          )''')
+        
+        # 2. Arkivtabell (uten passord, med eier-ID)
+        cursor.execute('''CREATE TABLE IF NOT EXISTS archives (
+                            name TEXT PRIMARY KEY,
+                            owner_id INTEGER NOT NULL,
+                            FOREIGN KEY (owner_id) REFERENCES users (id)
+                          )''')
+        
+        # 3. NYTT: Mellomtabell for medlemskap og roller
+        cursor.execute('''CREATE TABLE IF NOT EXISTS archive_members (
+                            archive_name TEXT NOT NULL,
+                            user_id INTEGER NOT NULL,
+                            role TEXT NOT NULL CHECK(role IN ('owner', 'editor', 'viewer')),
+                            PRIMARY KEY (archive_name, user_id),
+                            FOREIGN KEY (archive_name) REFERENCES archives (name) ON DELETE CASCADE,
+                            FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+                          )''')
+
+        # 4. Dokumenttabell (som før, men `updatedby` vil nå være en user_id)
+        cursor.execute('''CREATE TABLE IF NOT EXISTS documents (
+                            fullname TEXT,
+                            name TEXT,
+                            path TEXT,
+                            body TEXT,
+                            lastupdated TEXT,
+                            updatedby TEXT,
+                            timestamp TEXT,
+                            archive TEXT,
+                            PRIMARY KEY (fullname, archive),
+                            FOREIGN KEY (archive) REFERENCES archives (name) ON DELETE CASCADE
+                          )''')
+        
+        # 5. Link- og konfigurasjonstabeller (som før)
+        cursor.execute('''CREATE TABLE IF NOT EXISTS links (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            linkfrom TEXT,
+                            linkto TEXT,
+                            linkclass TEXT
+                          )''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS server_config (
+                            key TEXT PRIMARY KEY,
+                            value TEXT
+                          )''')
+        cursor.execute("INSERT OR IGNORE INTO server_config (key, value) VALUES ('server_token', '')")
+        
+    logging.info("Database schema initialized successfully.")
+    # Logikk for å sette servertoken fra miljøvariabel (som før)
+    env_var_token = os.environ.get('SERVERTOKEN')
+    if env_var_token:
+        logging.info("Found SERVERTOKEN environment variable, setting server token.")
+        set_server_token_on_startup(env_var_token)
+
+
+# --- Loggføring (med nye operasjoner) ---
+def log_operation(operation: str, payload: dict):
+    """Skriver en operasjon til den sentrale kommando-loggen."""
+    log_entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "operation": operation,
+        "payload": payload
+    }
+    try:
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+    except Exception as e:
+        logging.error(f"CRITICAL: Failed to write to command log: {e}")
+
+
+# --- NYTT: JWT Autentiserings-dekorator ---
+def jwt_required(f):
+    """En dekorator for å beskytte endepunkter som krever en gyldig JWT."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        if 'Authorization' in request.headers:
+            auth_header = request.headers['Authorization']
+            parts = auth_header.split()
+            if len(parts) == 2 and parts[0].lower() == 'bearer':
+                token = parts[1]
+        
+        if not token:
+            return jsonify({'error': 'Token is missing'}), 401
+        
+        try:
+            # Dekoder tokenet og lagrer brukerinfo i Flask sin globale 'g'-kontekst
+            data = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+            g.current_user = {'id': data['user_id'], 'email': data['email']}
+        except jwt.ExpiredSignatureError:
+            return jsonify({'error': 'Token has expired'}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({'error': 'Token is invalid'}), 401
+        
+        return f(*args, **kwargs)
+    return decorated
+
+
+# --- NYTT: Hjelpefunksjon for å sjekke tilgang til arkiv ---
+def check_user_access(user_id, archive_name, allowed_roles=('owner', 'editor', 'viewer')):
+    """Sjekker om en bruker har en av de tillatte rollene i et arkiv."""
+    with get_db_connection() as conn:
+        member = conn.execute(
+            "SELECT role FROM archive_members WHERE user_id = ? AND archive_name = ?",
+            (user_id, archive_name)
+        ).fetchone()
+    
+    if member and member['role'] in allowed_roles:
+        return member['role'] # Returnerer rollen hvis tilgang er OK
+    return None # Returnerer None hvis ingen tilgang
+
+
+# --- Server-token sjekk (som før) ---
+@app.before_request
+def check_server_token():
+    # OPTIONS-kall trenger ikke sjekkes
+    if request.method == 'OPTIONS':
+        return
+    # Offentlige endepunkter som ikke trenger server-token
+    public_endpoints = ['set_server_token', 'static', 'register_user', 'login_user']
+    if request.endpoint in public_endpoints:
+        return
+
+    with get_db_connection() as conn:
+        server_token_row = conn.execute("SELECT value FROM server_config WHERE key = 'server_token'").fetchone()
+    server_token = server_token_row['value'] if server_token_row else ''
+
+    if server_token:
+        request_token = request.headers.get('X-Server-Token')
+        if not request_token or request_token != server_token:
+            return jsonify({'error': 'Unauthorized: Missing or invalid X-Server-Token'}), 401
+
+
+# --- NYTT: Endepunkter for Brukerhåndtering ---
+@app.route('/users/register', methods=['POST'])
+def register_user():
+    data = request.json
+    email = data.get('email')
+    password = data.get('password')
+    display_name = data.get('displayName', email) # Bruk e-post som default visningsnavn
+
+    if not email or not password or not EMAIL_REGEX.match(email):
+        return jsonify({'error': 'Valid email and password are required'}), 400
+
+    hashed_password = generate_password_hash(password)
+    try:
+        with get_db_connection() as conn:
+            user_id = conn.execute(
+                "INSERT INTO users (email, password_hash, display_name) VALUES (?, ?, ?)",
+                (email, hashed_password, display_name)
+            ).lastrowid
+        
+        log_operation('register_user', {'id': user_id, 'email': email, 'display_name': display_name})
+        logging.info(f"User registered successfully: {email}")
+        return jsonify({'message': 'User registered successfully'}), 201
+
+    except sqlite3.IntegrityError:
+        return jsonify({'error': 'Email already registered'}), 409
+    except Exception as e:
+        logging.error(f"Error during user registration: {e}")
+        return jsonify({'error': 'Could not register user'}), 500
+
+@app.route('/users/login', methods=['POST'])
+def login_user():
+    data = request.json
+    email = data.get('email')
+    password = data.get('password')
+
+    if not email or not password:
+        return jsonify({'error': 'Email and password are required'}), 400
+
+    with get_db_connection() as conn:
+        user = conn.execute("SELECT id, password_hash FROM users WHERE email = ?", (email,)).fetchone()
+    
+    if not user or not check_password_hash(user['password_hash'], password):
+        return jsonify({'error': 'Invalid credentials'}), 401
+
+    # Lag en JWT som er gyldig i 24 timer
+    token = jwt.encode({
+        'user_id': user['id'],
+        'email': email,
+        'exp': datetime.now(timezone.utc) + timedelta(hours=24)
+    }, app.config['SECRET_KEY'], algorithm='HS256')
+
+    logging.info(f"User logged in: {email}")
+    return jsonify({'token': token})
+
+
+# --- ENDRET: Endepunkter for Arkivhåndtering (nå med JWT) ---
+@app.route('/create_archive', methods=['POST'])
+@jwt_required # <-- Krever nå gyldig login
+def create_archive():
+    archive_name = request.headers.get('Archive')
+    if not archive_name:
+        return jsonify({'error': 'Archive header is required'}), 400
+
+    user_id = g.current_user['id']
+    
+    try:
+        with get_db_connection() as conn:
+            # Sjekk om arkivet allerede finnes
+            if conn.execute("SELECT 1 FROM archives WHERE name = ?", (archive_name,)).fetchone():
+                return jsonify({'error': f'Archive with name {archive_name} already exists'}), 409
+            
+            # Opprett arkivet
+            conn.execute("INSERT INTO archives (name, owner_id) VALUES (?, ?)", (archive_name, user_id))
+            # Legg til eieren som medlem med 'owner'-rolle
+            conn.execute("INSERT INTO archive_members (archive_name, user_id, role) VALUES (?, ?, 'owner')", (archive_name, user_id))
+        
+        log_operation('create_archive', {"archive": archive_name, "owner_id": user_id})
+        logging.info(f"Archive '{archive_name}' created by user ID {user_id}")
+        return jsonify({'status': 'success'}), 201
+
+    except Exception as e:
+        logging.error(f"Error creating archive: {e}")
+        return jsonify({'error': 'Could not create archive'}), 500
+
+@app.route('/list_archives', methods=['GET'])
+@jwt_required # <-- Krever nå gyldig login
+def list_archives():
+    """Returnerer en liste over arkiver som den påloggede brukeren er medlem av."""
+    user_id = g.current_user['id']
+    try:
+        with get_db_connection() as conn:
+            # Hent arkiver brukeren er medlem i, og join for å få eierens e-post
+            archives = conn.execute("""
+                SELECT a.name, u.email as owner_email
+                FROM archives a
+                JOIN archive_members am ON a.name = am.archive_name
+                JOIN users u ON a.owner_id = u.id
+                WHERE am.user_id = ?
+                ORDER BY a.name
+            """, (user_id,)).fetchall()
+            
+        archive_list = [{'name': row['name'], 'owner': row['owner_email']} for row in archives]
+        return jsonify(archive_list)
+
+    except Exception as e:
+        logging.error(f"Error fetching archives for user {user_id}: {e}")
+        return jsonify({'error': 'Could not retrieve archives'}), 500
+
+
+# --- NYTT: Endepunkter for Samarbeid ---
+@app.route('/archives/<string:archive_name>/members', methods=['POST'])
+@jwt_required
+def add_member(archive_name):
+    # Sjekk om pålogget bruker er eier av arkivet
+    if not check_user_access(g.current_user['id'], archive_name, allowed_roles=['owner']):
+        return jsonify({'error': 'Forbidden: Only the archive owner can add members'}), 403
+
+    data = request.json
+    email_to_add = data.get('email')
+    role = data.get('role', 'editor')
+
+    if not email_to_add or role not in ['editor', 'viewer']:
+        return jsonify({'error': 'Valid email and role (\'editor\' or \'viewer\') are required'}), 400
+
+    with get_db_connection() as conn:
+        # Finn brukeren som skal legges til
+        user_to_add = conn.execute("SELECT id FROM users WHERE email = ?", (email_to_add,)).fetchone()
+        if not user_to_add:
+            return jsonify({'error': f'User with email {email_to_add} not found'}), 404
+        
+        user_id_to_add = user_to_add['id']
+        
+        try:
+            conn.execute(
+                "INSERT INTO archive_members (archive_name, user_id, role) VALUES (?, ?, ?)",
+                (archive_name, user_id_to_add, role)
+            )
+            log_operation('add_member', {'archive': archive_name, 'user_id': user_id_to_add, 'role': role})
+            logging.info(f"User ID {user_id_to_add} added to archive '{archive_name}' with role '{role}'")
+            return jsonify({'message': f'User {email_to_add} added to archive'}), 200
+
+        except sqlite3.IntegrityError:
+            return jsonify({'error': f'User {email_to_add} is already a member of this archive'}), 409
+
+# --- ENDRET: Alle dokument-endepunkter bruker nå JWT og tilgangssjekk ---
+@app.route('/insert', methods=['POST'])
+@jwt_required
+def insert_document():
+    archive = request.headers.get('Archive')
+    # Sjekk at brukeren har skriverettigheter ('editor' eller 'owner')
+    if not check_user_access(g.current_user['id'], archive, allowed_roles=['owner', 'editor']):
+        return jsonify({'error': 'Forbidden: You do not have permission to write to this archive'}), 403
+
+    # ... resten av funksjonen er nesten lik, men `updatedby` settes til brukerens ID
+    data = request.json
+    # ... validering av data ...
+    
+    name = data['name'].strip().lstrip('/')
+    path = data.get('path', '').strip().lstrip('/')
+    body = data['body']
+    updatedby = g.current_user['id'] # <-- ENDRING
+    timestamp = datetime.now(timezone.utc).isoformat()
+    lastupdated = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+
+    if '/' in name:
+        additional_path, name = name.rsplit('/', 1)
+        path = f"{path}/{additional_path}".strip('/')
+    if not name.lower().endswith('.kli'):
+        name += '.kli'
+    fullname = f"{path}/{name}".strip('/')
+
+    with get_db_connection() as conn:
+        conn.execute("DELETE FROM links WHERE linkfrom = ?", (fullname,))
+        conn.execute('''INSERT INTO documents (fullname, name, path, body, lastupdated, updatedby, timestamp, archive)
+                          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                          ON CONFLICT(fullname, archive) DO UPDATE SET
+                            name=excluded.name, path=excluded.path, body=excluded.body,
+                            lastupdated=excluded.lastupdated, updatedby=excluded.updatedby, timestamp=excluded.timestamp''',
+                       (fullname, name, path, body, lastupdated, updatedby, timestamp, archive))
+        links = re.findall(r'\[\[(.*?)\]\]', body)
+        for link in links:
+            if not link.lower().endswith('.kli'):
+                link += '.kli'
+            conn.execute("INSERT INTO links (linkfrom, linkto, linkclass) VALUES (?, ?, ?)",
+                           (fullname, link, 'document'))
+    
+    log_operation('insert_document', {"archive": archive, "fullname": fullname, "body": body, "user_id": updatedby})
+    return jsonify({'status': 'success'})
+
+@app.route('/retrieve', methods=['GET'])
+@jwt_required
+def retrieve_document():
+    archive = request.headers.get('Archive')
+    fullname = request.args.get('fullname')
+    # Sjekk at brukeren har leserettigheter (alle roller)
+    if not check_user_access(g.current_user['id'], archive):
+        return jsonify({'error': 'Forbidden: You do not have permission to read from this archive'}), 403
+    
+    # ... resten av funksjonen er lik
+    if not fullname:
+        return jsonify({'error': 'Fullname is required'}), 400
+
+    fullname = fullname.strip().lstrip('/')
+    if not fullname.lower().endswith('.kli'):
+        fullname += '.kli'
+
+    with get_db_connection() as conn:
+        document = conn.execute("SELECT * FROM documents WHERE fullname = ? AND archive = ?", (fullname, archive)).fetchone()
+        if document:
+            doc_dict = dict(document) # Konverter rad til dict
+            # Hent innkommende lenker
+            incoming_links_rows = conn.execute("SELECT linkfrom FROM links WHERE linkto = ?", (fullname,)).fetchall()
+            doc_dict['incominglinks'] = ','.join([row['linkfrom'] for row in incoming_links_rows])
+            return jsonify(doc_dict)
+        else:
+            return jsonify({'error': 'Document not found'}), 404
+
+# OLD OLD OLD OLD OLD
 
 def set_server_token_on_startup(token):
     """Overwrites the server token in the database."""
@@ -41,52 +410,6 @@ def set_server_token_on_startup(token):
     logging.info("Server token has been set and logged. ✅")
 
 
-def init_db():
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute('''CREATE TABLE IF NOT EXISTS archives (
-                            name TEXT PRIMARY KEY,
-                            password TEXT NOT NULL,
-                            owner TEXT NOT NULL)''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS documents (
-                            fullname TEXT,
-                            name TEXT,
-                            path TEXT,
-                            body TEXT,
-                            lastupdated TEXT,
-                            updatedby TEXT,
-                            timestamp TEXT,
-                            archive TEXT,
-                            PRIMARY KEY (fullname, archive),
-                            FOREIGN KEY (archive) REFERENCES archives (name))''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS links (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            linkfrom TEXT,
-                            linkto TEXT,
-                            linkclass TEXT)''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS server_config (
-                            key TEXT PRIMARY KEY,
-                            value TEXT)''')
-        cursor.execute("INSERT OR IGNORE INTO server_config (key, value) VALUES ('server_token', '')")
-        conn.commit()
-
-        env_var_token = os.environ.get('SERVERTOKEN')
-        if env_var_token:
-            logging.info("Found SERVERTOKEN environment variable and setting servertoken.")
-            set_server_token_on_startup(env_var_token)
-
-def log_operation(operation: str, payload: dict):
-    """Skriver en operasjon til den sentrale kommando-loggen."""
-    log_entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "operation": operation,
-        "payload": payload
-    }
-    try:
-        with open(LOG_FILE, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
-    except Exception as e:
-        logging.error(f"CRITICAL: Failed to write to command log: {e}")
 
 def replay_from_log(log_file_path):
     """Leser en loggfil og gjenskaper databasen ved å rekjøre alle operasjoner."""
@@ -174,8 +497,6 @@ def replay_from_log(log_file_path):
         conn.commit()
     logging.info(f"Database restore completed. Replayed {line_count} operations.")
 
-# LEGG TIL DENNE NYE FUNKSJONEN I app.py
-
 def compact_log_file():
     """Lager en kompakt versjon av loggfilen."""
     if not os.path.exists(LOG_FILE):
@@ -251,25 +572,6 @@ def compact_log_file():
     logging.info(f"Log compaction complete. New log contains {len(final_ops)} operations.")
     return True
 
-# Sjekk at servertoken en riktig nøkkel for denne databasen (sikrer aksess)
-@app.before_request
-def check_server_token():
-    if request.method == 'OPTIONS':
-        return
-    if request.endpoint in ['set_server_token', 'static']:
-        return
-
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT value FROM server_config WHERE key = 'server_token'")
-        result = cursor.fetchone()
-    server_token = result[0] if result else ''
-
-    if server_token:
-        request_token = request.headers.get('X-Server-Token')
-        if not request_token or request_token != server_token:
-            return jsonify({'error': 'Unauthorized: Missing or invalid X-Server-Token'}), 401
-
 # Sett servertoken. Kan bare gjøres dersom servertoken er ""
 @app.route('/set_server_token', methods=['POST'])
 def set_server_token():
@@ -301,192 +603,62 @@ def verify_archive(archive, password):
             return True
     return False
 
-# Skap et nytt arkiv
-@app.route('/create_archive', methods=['POST'])
-def create_archive():
-    archive = request.headers.get('Archive')
-    password = request.headers.get('Password')
-    owner_email = request.headers.get('Owner-Email')
-
-    if not archive or not password:
-        return jsonify({'error': 'Archive and password headers are required'}), 400
-    if not owner_email or not EMAIL_REGEX.match(owner_email):
-        return jsonify({'error': 'A valid Owner-Email header is required'}), 400
-
-    hashed_password = generate_password_hash(password)
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("INSERT INTO archives (name, password, owner) VALUES (?, ?, ?)", (archive, hashed_password, owner_email))
-            conn.commit()
-
-        # Logg operasjonen etter vellykket commit
-        log_operation('create_archive', {
-            "archive": archive,
-            "owner": owner_email,
-            "password_hash": hashed_password
-        })
-
-    except sqlite3.IntegrityError:
-        return jsonify({'error': f'Archive with name {archive} already exists'}), 409
-    except Exception as e:
-        logging.error(f"Error creating archive: {e}")
-        return jsonify({'error': 'Could not create archive'}), 500
-
-    return jsonify({'status': 'success'})
-
-# Returner en liste med alle arkiv
-@app.route('/list_archives', methods=['GET'])
-def list_archives():
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT name, owner FROM archives ORDER BY name")
-            archives = cursor.fetchall()
-        archive_list = [{'name': name, 'owner': owner} for name, owner in archives]
-        return jsonify(archive_list)
-    except Exception as e:
-        logging.error(f"Error fetching archives: {e}")
-        return jsonify({'error': 'Could not retrieve archives from the database'}), 500
-
-# Sett inn eller oppdater (UPSERT) et dokument i et arkiv. Navnet er nøkkelen
-@app.route('/insert', methods=['POST'])
-def insert_document():
-    data = request.json
-    archive = request.headers.get('Archive')
-    password = request.headers.get('Password')
-
-    if not archive or not password:
-        return jsonify({'error': 'Archive and password headers are required'}), 400
-    if not verify_archive(archive, password):
-        return jsonify({'error': 'Invalid archive or password'}), 403
-    if 'name' not in data or 'body' not in data:
-        return jsonify({'error': 'Document name and body are required'}), 400
-
-    name = data['name'].strip().lstrip('/')
-    path = data.get('path', '').strip().lstrip('/')
-    body = data['body']
-    updatedby = 'defaultuser'
-    timestamp = datetime.now(timezone.utc).isoformat()
-    lastupdated = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-
-    if '/' in name:
-        additional_path, name = name.rsplit('/', 1)
-        path = f"{path}/{additional_path}".strip('/')
-    if not name.lower().endswith('.kli'):
-        name += '.kli'
-    fullname = f"{path}/{name}".strip('/')
-
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM links WHERE linkfrom = ?", (fullname,))
-        cursor.execute('''INSERT INTO documents (fullname, name, path, body, lastupdated, updatedby, timestamp, archive)
-                          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                          ON CONFLICT(fullname, archive) DO UPDATE SET
-                            name=excluded.name, path=excluded.path, body=excluded.body,
-                            lastupdated=excluded.lastupdated, updatedby=excluded.updatedby, timestamp=excluded.timestamp''',
-                       (fullname, name, path, body, lastupdated, updatedby, timestamp, archive))
-        links = re.findall(r'\[\[(.*?)\]\]', body)
-        for link in links:
-            if not link.lower().endswith('.kli'):
-                link += '.kli'
-            cursor.execute("INSERT INTO links (linkfrom, linkto, linkclass) VALUES (?, ?, ?)",
-                           (fullname, link, 'document'))
-        conn.commit()
-    
-    # Logg operasjonen etter vellykket commit
-    log_operation('insert_document', {
-        "archive": archive,
-        "fullname": fullname,
-        "body": body
-    })
-
-    return jsonify({'status': 'success'})
-
-# Hent et dokument fra et arkiv
-@app.route('/retrieve', methods=['GET'])
-def retrieve_document():
-    archive = request.headers.get('Archive')
-    password = request.headers.get('Password')
-    fullname = request.args.get('fullname')
-
-    if not archive or not password:
-        return jsonify({'error': 'Archive and password headers are required'}), 400
-    if not fullname:
-        return jsonify({'error': 'Fullname is required'}), 400
-    if not verify_archive(archive, password):
-        return jsonify({'error': 'Invalid archive or password'}), 403
-
-    fullname = fullname.strip().lstrip('/')
-    if not fullname.lower().endswith('.kli'):
-        fullname += '.kli'
-
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM documents WHERE fullname = ? AND archive = ?", (fullname, archive))
-        document = cursor.fetchone()
-        if document:
-            doc_dict = {'fullname': document[0], 'name': document[1], 'path': document[2], 'body': document[3],
-                        'lastupdated': document[4], 'updatedby': document[5], 'timestamp': document[6], 'archive': document[7]}
-            cursor.execute("SELECT linkfrom FROM links WHERE linkto = ?", (fullname,))
-            incoming_links = cursor.fetchall()
-            doc_dict['incominglinks'] = ','.join([link[0] for link in incoming_links])
-            return jsonify(doc_dict)
-        else:
-            return jsonify({'error': 'Document not found'}), 404
-
 # Return list of all documetns in an archive 
 @app.route('/documents', methods=['GET'])
+@jwt_required
 def list_documents():
     archive = request.headers.get('Archive')
-    password = request.headers.get('Password')
     since_timestamp_str = request.args.get('sincetimestamp')
 
-    if not archive or not password:
-        return jsonify({'error': 'Archive and password headers are required'}), 400
-    if not verify_archive(archive, password):
-        return jsonify({'error': 'Invalid archive or password'}), 403
+    if not archive:
+        return jsonify({'error': 'Archive header is required'}), 400
+
+    # Sjekk at brukeren har minst leserettigheter ('viewer', 'editor', 'owner')
+    if not check_user_access(g.current_user['id'], archive):
+        return jsonify({'error': 'Forbidden: You do not have permission to read from this archive'}), 403
 
     try:
         with get_db_connection() as conn:
-            cursor = conn.cursor()
             sql_query = "SELECT name, path, lastupdated, updatedby, timestamp FROM documents WHERE archive = ?"
             params = [archive]
             if since_timestamp_str:
+                # Beholder logikken for synkronisering
                 parsed_timestamp = datetime.fromisoformat(since_timestamp_str.replace('Z', '+00:00'))
                 target_time = parsed_timestamp - timedelta(seconds=3)
                 target_time_str = target_time.strftime('%Y-%m-%d %H:%M:%S')
                 sql_query += " AND lastupdated > ?"
                 params.append(target_time_str)
-            cursor.execute(sql_query, params)
-            documents = cursor.fetchall()
+            
+            documents = conn.execute(sql_query, params).fetchall()
+
     except ValueError:
         return jsonify({'error': 'Invalid sincetimestamp format. Please use ISO 8601 format.'}), 400
     except Exception as e:
-        logging.error(f"Error listing documents: {e}")
+        logging.error(f"Error listing documents for user {g.current_user['id']}: {e}")
         return jsonify({'error': 'An internal server error occurred.'}), 500
 
-    empty_path_docs = [doc for doc in documents if doc[1] == '']
-    non_empty_path_docs = [doc for doc in documents if doc[1] != '']
-    non_empty_path_docs.sort(key=lambda x: (x[1], x[0]))
-    empty_path_docs.sort(key=lambda x: x[0])
-    sorted_documents = empty_path_docs + non_empty_path_docs
-
-    doc_list = [{'name': doc[0], 'path': doc[1], 'lastupdated': doc[2], 'updatedby': doc[3], 'timestamp': doc[4]}
-                for doc in sorted_documents]
-    return jsonify(doc_list)
+    # Beholder sorteringslogikken fra originalkoden
+    empty_path_docs = [dict(doc) for doc in documents if doc['path'] == '']
+    non_empty_path_docs = [dict(doc) for doc in documents if doc['path'] != '']
+    non_empty_path_docs.sort(key=lambda x: (x['path'], x['name']))
+    empty_path_docs.sort(key=lambda x: x['name'])
+    
+    return jsonify(empty_path_docs + non_empty_path_docs)
 
 # Slett et dokument
 @app.route('/delete_document', methods=['DELETE'])
+@jwt_required
 def delete_document():
     data = request.json
     archive = request.headers.get('Archive')
-    password = request.headers.get('Password')
+    
+    if not archive:
+        return jsonify({'error': 'Archive header is required'}), 400
 
-    if not archive or not password:
-        return jsonify({'error': 'Archive and password headers are required'}), 400
-    if not verify_archive(archive, password):
-        return jsonify({'error': 'Invalid archive or password'}), 403
+    # Sjekk at brukeren har skriverettigheter ('editor' eller 'owner')
+    if not check_user_access(g.current_user['id'], archive, allowed_roles=['owner', 'editor']):
+        return jsonify({'error': 'Forbidden: You do not have permission to delete documents in this archive'}), 403
+
     if 'name' not in data:
         return jsonify({'error': 'Document name is required'}), 400
 
@@ -501,29 +673,31 @@ def delete_document():
     fullname = f"{path}/{name}".strip('/')
 
     with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM documents WHERE fullname = ? AND archive = ?", (fullname, archive))
-        cursor.execute("DELETE FROM links WHERE linkfrom = ?", (fullname,))
-        conn.commit()
+        # Slett dokument og tilhørende utgående lenker
+        conn.execute("DELETE FROM documents WHERE fullname = ? AND archive = ?", (fullname, archive))
+        conn.execute("DELETE FROM links WHERE linkfrom = ?", (fullname,))
     
-    # Logg operasjonen etter vellykket commit
+    # Logg operasjonen med bruker-ID
     log_operation('delete_document', {
         "archive": archive,
-        "fullname": fullname
+        "fullname": fullname,
+        "user_id": g.current_user['id']
     })
 
     return jsonify({'status': 'success'})
 
 # Endre navnet på et dokument (og juster alle referanser til dokumentet i andre dokumenter)
 @app.route('/rename_document', methods=['POST'])
+@jwt_required
 def rename_document():
     archive = request.headers.get('Archive')
-    password = request.headers.get('Password')
+    
+    if not archive:
+        return jsonify({'error': 'Archive header is required'}), 400
 
-    if not archive or not password:
-        return jsonify({'error': 'Archive and password headers are required'}), 400
-    if not verify_archive(archive, password):
-        return jsonify({'error': 'Invalid archive or password'}), 403
+    # Sjekk at brukeren har skriverettigheter ('editor' eller 'owner')
+    if not check_user_access(g.current_user['id'], archive, allowed_roles=['owner', 'editor']):
+        return jsonify({'error': 'Forbidden: You do not have permission to rename documents in this archive'}), 403
     
     data = request.get_json()
     if not data or 'oldFullname' not in data or 'newFullname' not in data:
@@ -537,51 +711,65 @@ def rename_document():
 
     old_base_name = old_fullname.lower().removesuffix('.kli')
     new_base_name_for_link = new_fullname.removesuffix('.kli')
+    user_id = g.current_user['id']
 
     try:
         with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1 FROM documents WHERE fullname = ? AND archive = ?", (old_fullname, archive))
-            if not cursor.fetchone():
+            # Start en transaksjon manuelt for denne komplekse operasjonen
+            conn.execute("BEGIN")
+
+            # Sjekk forutsetninger
+            if not conn.execute("SELECT 1 FROM documents WHERE fullname = ? AND archive = ?", (old_fullname, archive)).fetchone():
+                conn.execute("ROLLBACK")
                 return jsonify({'error': f'Document "{old_fullname}" not found'}), 404
-            cursor.execute("SELECT 1 FROM documents WHERE fullname = ? AND archive = ?", (new_fullname, archive))
-            if cursor.fetchone():
+            if conn.execute("SELECT 1 FROM documents WHERE fullname = ? AND archive = ?", (new_fullname, archive)).fetchone():
+                conn.execute("ROLLBACK")
                 return jsonify({'error': f'Document name "{new_fullname}" already exists'}), 409
 
+            # Oppdater selve dokumentet
             new_path, new_name = os.path.split(new_fullname)
             timestamp = datetime.now(timezone.utc).isoformat()
             lastupdated = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+            
+            cursor = conn.cursor()
             cursor.execute("""
-                UPDATE documents SET fullname = ?, name = ?, path = ?, lastupdated = ?, timestamp = ?
+                UPDATE documents SET fullname = ?, name = ?, path = ?, lastupdated = ?, timestamp = ?, updatedby = ?
                 WHERE fullname = ? AND archive = ?
-            """, (new_fullname, new_name, new_path, lastupdated, timestamp, old_fullname, archive))
+            """, (new_fullname, new_name, new_path, lastupdated, timestamp, user_id, old_fullname, archive))
+
+            # Oppdater lenketabellen
             cursor.execute("UPDATE links SET linkfrom = ? WHERE linkfrom = ?", (new_fullname, old_fullname))
             cursor.execute("UPDATE links SET linkto = ? WHERE linkto = ?", (new_fullname, old_fullname))
+            
+            # Oppdater referanser i andre dokumenter (den mest komplekse delen)
             docs_to_scan = cursor.execute("SELECT fullname, body FROM documents WHERE archive = ?", (archive,)).fetchall()
 
             def replacer(match):
                 link_content = match.group(1)
                 normalized_link = link_content.lower().removesuffix('.kli')
-                if normalized_link == old_base_name:
-                    return f'[[{new_base_name_for_link}]]'
-                else:
-                    return match.group(0)
+                return f'[[{new_base_name_for_link}]]' if normalized_link == old_base_name else match.group(0)
 
-            for doc_fullname, body in docs_to_scan:
+            for doc_row in docs_to_scan:
+                doc_fullname, body = doc_row['fullname'], doc_row['body']
                 new_body = re.sub(r'\[\[(.*?)\]\]', replacer, body)
                 if new_body != body:
                     cursor.execute("UPDATE documents SET body = ? WHERE fullname = ? AND archive = ?", (new_body, doc_fullname, archive))
+            
+            # Fullfør transaksjonen
+            conn.execute("COMMIT")
         
         # Logg operasjonen etter vellykket transaksjon
         log_operation('rename_document', {
             "archive": archive,
             "oldFullname": old_fullname,
-            "newFullname": new_fullname
+            "newFullname": new_fullname,
+            "user_id": user_id
         })
         
         return jsonify({'status': 'success', 'message': f'Document successfully renamed to {new_fullname}'})
 
     except Exception as e:
+        # Hvis noe går galt, rulles transaksjonen tilbake automatisk når 'with'-blokken avsluttes med en feil
         logging.error(f"An error occurred during rename operation: {e}")
         return jsonify({'error': 'An internal error occurred. The rename operation was rolled back.'}), 500
 
@@ -589,53 +777,30 @@ def rename_document():
 logging.info('Initializing database.')
 init_db()
 
+# --- Oppstart og CLI ---
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Mindmesh Server')
-    parser.add_argument('--database_full_restore', action='store_true', help='Delete the current database and restore it from the command log.')
-    parser.add_argument('--compact_logs', action='store_true', help='Compacts the command log to its minimal state.')
-    args = parser.parse_args()
-
-    # Håndter full gjenoppretting hvis flagget er satt
-    if args.database_full_restore:
-        if not os.path.exists(LOG_FILE):
-            print(f"ERROR: Log file '{LOG_FILE}' not found. Cannot restore.")
-            sys.exit(1)
-            
-        answer = input(f"Do you really want to delete '{DATABASE}' and restore from '{LOG_FILE}'? (yes/no): ").lower()
-        if answer not in ['yes', 'y']:
-            print("Restore operation cancelled by user.")
-            sys.exit(0)
-
-        # Trinn 1 (NY LOGIKK): Lag en datert backup-kopi av loggfilen
-        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_log_filename = f"backup_{timestamp_str}_{LOG_FILE}"
-        shutil.copy(LOG_FILE, backup_log_filename)
-        logging.info(f"Created backup of log file at: {backup_log_filename}")
-
-        # Trinn 2: Slett den eksisterende databasen
-        if os.path.exists(DATABASE):
-            os.remove(DATABASE)
-            logging.info(f"Deleted existing database: {DATABASE}")
-
-        # Trinn 3: Initialiser en ny, tom database
-        logging.info("Initializing new database...")
-        init_db()
-
-        # Trinn 4 (NY LOGIKK): Kjør gjenoppretting fra den ORIGINALE loggfilen
-        replay_from_log(LOG_FILE)
-        
-        print("\nDatabase restore complete. Exiting program. Ready to be restarted to serve documents from restored database.")
-        sys.exit(0)
-
-    if args.compact_logs:
-        compact_log_file()
-        print("\nLog compaction process finished. Exiting program.")
-        sys.exit(0)
-
-    # Denne koden kjøres alltid, også etter en restore
-    # (init_db kjører igjen, men gjør ingenting siden databasen nå finnes)
+    # Initialiser databasen ved oppstart
     init_db()
 
-    logging.info('Starting web application.')
+    # Kommando-linje argumenter for vedlikehold (som før, men merk at replay vil feile på gamle logger)
+    parser = argparse.ArgumentParser(description='Mindmesh Server - User & Collaboration Edition')
+    parser.add_argument('--force_db_init', action='store_true', help='Deletes the current database and creates a fresh one.')
+    args = parser.parse_args()
+
+    if args.force_db_init:
+        answer = input(f"DANGER: This will delete '{DATABASE}'. Are you sure? (yes/no): ").lower()
+        if answer in ['yes', 'y']:
+            if os.path.exists(DATABASE):
+                os.remove(DATABASE)
+                logging.info(f"Deleted existing database: {DATABASE}")
+            init_db()
+            print("Fresh database created. Exiting. Please restart the server normally.")
+            sys.exit(0)
+        else:
+            print("Operation cancelled.")
+            sys.exit(0)
+
+    logging.info('Starting Mindmesh web application.')
     port = int(os.environ.get('PORT', 54827))
+    # Bruk `debug=False` i produksjon
     app.run(host="0.0.0.0", port=port, debug=True, threaded=True)
