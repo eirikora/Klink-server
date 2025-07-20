@@ -14,7 +14,7 @@ from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # --- KONFIGURASJON ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 app = Flask(__name__)
 CORS(app)
 
@@ -366,6 +366,7 @@ def insert_document():
                            (fullname, link, 'document'))
     
     log_operation('insert_document', {"archive": archive, "fullname": fullname, "body": body, "user_id": updatedby})
+    logging.warning(f"INSERTED DOCUMENT \"{name}\" with body \"{body}\"")
     return jsonify({'status': 'success'})
 
 @app.route('/retrieve', methods=['GET'])
@@ -644,6 +645,38 @@ def list_documents():
     empty_path_docs.sort(key=lambda x: x['name'])
     
     return jsonify(empty_path_docs + non_empty_path_docs)
+
+@app.route('/graph', methods=['GET'])
+@jwt_required
+def get_graph_data():
+    archive = request.headers.get('Archive')
+    if not archive:
+        return jsonify({'error': 'Archive header is required'}), 400
+
+    # Sjekk at brukeren har minst leserettigheter
+    if not check_user_access(g.current_user['id'], archive):
+        return jsonify({'error': 'Forbidden: You do not have permission to read from this archive'}), 403
+
+    try:
+        with get_db_connection() as conn:
+            # Hent alle noder (dokumenter) i arkivet
+            docs_cursor = conn.execute("SELECT fullname, name FROM documents WHERE archive = ?", (archive,))
+            nodes = [row['fullname'] for row in docs_cursor]
+            
+            # Hent alle kanter (lenker) i arkivet
+            links_cursor = conn.execute("SELECT linkfrom, linkto FROM links WHERE linkfrom IN (SELECT fullname FROM documents WHERE archive = ?)", (archive,))
+            edges = []
+            for i, row in enumerate(links_cursor):
+                # Sjekk at både kilde og mål for en lenke faktisk eksisterer som noder
+                if (row['linkfrom'] in nodes) and (row['linkto'] in nodes):
+                    edges.append({'source': row['linkfrom'],
+                        'target': row['linkto']})
+
+        return jsonify({'nodes': nodes, 'edges': edges})
+
+    except Exception as e:
+        logging.error(f"Error generating graph for archive {archive}: {e}")
+        return jsonify({'error': 'Could not generate graph data'}), 500
 
 # Slett et dokument
 @app.route('/delete_document', methods=['DELETE'])
