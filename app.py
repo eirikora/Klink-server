@@ -806,6 +806,19 @@ def rename_document():
         logging.error(f"An error occurred during rename operation: {e}")
         return jsonify({'error': 'An internal error occurred. The rename operation was rolled back.'}), 500
 
+@app.route('/healthz', methods=['GET'])
+def health_check():
+    """
+    Et enkelt, offentlig endepunkt for å sjekke at serveren kjører.
+    Returnerer alltid status 200 OK med en enkel JSON-melding.
+    """
+    # Vi returnerer et enkelt JSON-svar.
+    # Denne ruten er offentlig og bruker ikke @jwt_required-dekoratøren.
+    return jsonify({
+        "status": "ok",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    })
+
 # Initialiser databasen ved oppstarten
 logging.info('Initializing database.')
 init_db()
