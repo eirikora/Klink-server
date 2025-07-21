@@ -1,269 +1,412 @@
+# OpenAPI-versjonen som brukes. 3.0.3 er en stabil og utbredt versjon.
 openapi: 3.0.3
-info:
-  title: Mindmesh API
-  version: 1.3.0
-  description: |-
-    API for administrasjon av dokumentarkiver med passordbeskyttelse og lenkestruktur.
-    Hvert arkiv må ha en eier (e-post).
-    Serveren kan sikres med et globalt 'X-Server-Token'.
-    Sett miljøvariabel PORT for alternativ portnummer.
-servers:
-  - url: http://localhost:54827
 
+# ---------------------------------------------------------------------------
+#  1. GENEREL INFORMASJON
+#  Dette er metadata om API-et.
+# ---------------------------------------------------------------------------
+info:
+  title: MindMesh API V2
+  description: |-
+    API for MindMesh V2, en server for å lagre og organisere markdown-baserte dokumenter i arkiver.
+    Denne versjonen introduserer brukerautentisering med JWT og rollebasert tilgangskontroll.
+  version: 2.0.0
+
+# ---------------------------------------------------------------------------
+#  2. SERVERE
+#  Her defineres base-URL-ene til API-et.
+# ---------------------------------------------------------------------------
+servers:
+  - url: https://server.mindmesh.no/
+    description: Produksjonsserveren i Azure.
+  - url: http://localhost:7071/
+    description: Lokal utviklingsserver som kjøres med `func start`. Port kan variere.
+
+# ---------------------------------------------------------------------------
+#  3. TAGS
+#  Tags brukes for å gruppere endepunkter i dokumentasjonen.
+# ---------------------------------------------------------------------------
+tags:
+  - name: Brukerhåndtering
+    description: Endepunkter for å registrere og logge inn brukere.
+  - name: Arkivhåndtering
+    description: Opprette og liste arkiver, samt administrere medlemmer.
+  - name: Dokumenthåndtering
+    description: Alle operasjoner relatert til dokumenter og deres innhold.
+
+# ---------------------------------------------------------------------------
+#  4. SIKKERHET
+#  Her definerer vi hvordan API-et sikres. V2 bruker JWT Bearer tokens.
+# ---------------------------------------------------------------------------
 components:
   securitySchemes:
-    ArchiveAuth:
-      type: apiKey
-      in: header
-      name: Archive
-    PasswordAuth:
-      type: apiKey
-      in: header
-      name: Password
-    ServerTokenAuth:
-      type: apiKey
-      in: header
-      name: X-Server-Token
+    bearerAuth: # Navnet vi gir til sikkerhetsmetoden.
+      type: http
+      scheme: bearer
+      bearerFormat: JWT # Hint til verktøy om at det er et JWT-token.
+      description: >
+        Logg inn via `/users/login` for å motta et JWT-token.
+        Send tokenet i `Authorization`-headeren på formatet `Bearer <token>`.
 
+# Standard sikkerhetskrav for alle endepunkter.
+# Dette kan overstyres per endepunkt (f.eks. for /login som er offentlig).
+security:
+  - bearerAuth: []
+
+# ---------------------------------------------------------------------------
+#  5. GJENBRUKBARE KOMPONENTER (SCHEMAS)
+#  Her definerer vi alle datamodellene for å unngå repetisjon.
+# ---------------------------------------------------------------------------
+components:
   schemas:
-    ArchiveInfo:
+    # --- Request Bodies ---
+    UserRegister:
       type: object
       properties:
-        name:
-          type: string
-          description: Navnet på arkivet.
-        owner:
+        email:
           type: string
           format: email
-          description: E-postadressen til eieren av arkivet.
-    Document:
+          example: test@example.com
+        password:
+          type: string
+          format: password
+          example: "sterkt-passord-123"
+        displayName:
+          type: string
+          example: "Test Bruker"
+      required: [email, password]
+
+    UserLogin:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+          example: test@example.com
+        password:
+          type: string
+          format: password
+          example: "sterkt-passord-123"
+      required: [email, password]
+
+    MemberAdd:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+          description: E-posten til brukeren som skal legges til.
+          example: "ny.bruker@example.com"
+        role:
+          type: string
+          description: Rollen brukeren skal ha.
+          enum: [editor, viewer]
+          default: editor
+      required: [email]
+
+    DocumentInsert:
       type: object
       properties:
         name:
           type: string
-          description: Dokumentets navn (f.eks. 'dokument.kli').
+          description: "Navn på dokumentet, kan inkludere undermapper (f.eks. 'mappe/mitt_dokument')."
+          example: "Prosjekt X/Idéer"
         path:
           type: string
-          description: Dokumentets sti (f.eks. 'mappe/undermappe').
+          description: "Valgfri rotmappe for dokumentet."
+          example: "Arbeid"
         body:
           type: string
-          description: Innholdet i dokumentet.
-        lastupdated:
-          type: string
-          format: date-time
-        updatedby:
-          type: string
-        timestamp:
-          type: string
-          format: date-time
-        incominglinks:
-          type: string
-          description: En kommaseparert liste med dokumenter som lenker til dette.
-    DocumentRequest:
+          description: "Innholdet i dokumentet (Markdown)."
+          example: "Dette er et nytt dokument med en [[lenke]] til et annet."
+      required: [name, body]
+
+    DocumentRename:
       type: object
-      required:
-        - name
-        - body
-      properties:
-        name:
-          type: string
-        path:
-          type: string
-        body:
-          type: string
-    DeleteDocumentRequest:
-      type: object
-      required:
-        - name
-      properties:
-        name:
-          type: string
-        path:
-          type: string
-    RenameDocumentRequest:
-      type: object
-      required:
-        - oldFullname
-        - newFullname
       properties:
         oldFullname:
           type: string
-          description: Det fulle navnet på dokumentet som skal endres (inkl. sti og .kli).
+          example: "Gammelt Mappenavn/Gammelt Dokumentnavn.kli"
         newFullname:
           type: string
-          description: Det nye fulle navnet på dokumentet (inkl. sti og .kli).
+          example: "Nytt Mappenavn/Nytt Dokumentnavn.kli"
+      required: [oldFullname, newFullname]
 
-# Global sikkerhet som gjelder for alle endepunkter med mindre de overstyrer det lokalt.
-security:
-  - ArchiveAuth: []
-    PasswordAuth: []
-    ServerTokenAuth: []
+    # --- Response Bodies ---
+    TokenResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
 
+    ArchiveList:
+      type: array
+      items:
+        type: object
+        properties:
+          name:
+            type: string
+            example: "Mitt Første Arkiv"
+          owner:
+            type: string
+            format: email
+            example: "eier@example.com"
+
+    Document:
+      type: object
+      properties:
+        id: { type: string }
+        archive: { type: string }
+        fullname: { type: string }
+        name: { type: string }
+        path: { type: string }
+        body: { type: string }
+        lastupdated: { type: string, format: date-time }
+        updatedby: { type: string, format: uuid }
+        timestamp: { type: string, format: date-time }
+        incominglinks: { type: string }
+
+    DocumentSummaryList:
+      type: array
+      items:
+        type: object
+        properties:
+          name: { type: string, example: "Dokument.kli" }
+          path: { type: string, example: "Mappe" }
+          lastupdated: { type: string, format: date-time }
+          updatedby: { type: string, format: uuid }
+          timestamp: { type: string, format: date-time }
+
+    Graph:
+      type: object
+      properties:
+        nodes:
+          type: array
+          items:
+            type: string
+            example: "Mappe/Dokument.kli"
+        edges:
+          type: array
+          items:
+            type: object
+            properties:
+              source:
+                type: string
+                example: "Mappe/Dokument.kli"
+              target:
+                type: string
+                example: "Et Annet Dokument.kli"
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+
+# ---------------------------------------------------------------------------
+#  6. ENDEPUNKTER (PATHS)
+#  Den faktiske definisjonen av hvert API-kall.
+# ---------------------------------------------------------------------------
 paths:
-  /set_server_token:
+  # --- Brukerhåndtering ---
+  /users/register:
     post:
-      summary: Sett server-token (engangsoperasjon)
-      description: Setter det globale server-tokenet. Kan bare kjøres én gang, når tokenet er tomt.
+      tags: [Brukerhåndtering]
+      summary: Registrer en ny bruker
+      security: [] # Offentlig endepunkt, ingen autentisering kreves.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserRegister'
+      responses:
+        '201': { description: "Bruker ble opprettet." }
+        '400': { description: "Ugyldig input.", content: { application/json: { schema: { $ref: '#/components/schemas/Error' }}}}
+        '409': { description: "E-posten er allerede registrert.", content: { application/json: { schema: { $ref: '#/components/schemas/Error' }}}}
+
+  /users/login:
+    post:
+      tags: [Brukerhåndtering]
+      summary: Logg inn og motta et JWT-token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserLogin'
       responses:
         '200':
-          description: Server-token ble satt.
-        '400':
-          description: Manglende X-Server-Token header.
-        '409':
-          description: Server-token er allerede satt og kan ikke endres.
-      security:
-        - ServerTokenAuth: [] # Krever kun token for å sette seg selv
+          description: "Vellykket innlogging."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401': { description: "Ugyldig brukernavn eller passord.", content: { application/json: { schema: { $ref: '#/components/schemas/Error' }}}}
+
+  # --- Arkivhåndtering ---
+  /create_archive:
+    post:
+      tags: [Arkivhåndtering]
+      summary: Opprett et nytt arkiv
+      parameters:
+        - name: Archive
+          in: header
+          required: true
+          schema: { type: string }
+          description: Navnet på arkivet som skal opprettes.
+      responses:
+        '201': { description: "Arkivet ble opprettet." }
+        '401': { description: "Ugyldig eller manglende token." }
+        '409': { description: "Arkiv med dette navnet finnes allerede." }
 
   /list_archives:
     get:
-      summary: List alle tilgjengelige arkiver med eiere
-      description: Returnerer en liste over alle arkiver med tilhørende eier. Krever ingen autentisering.
+      tags: [Arkivhåndtering]
+      summary: List alle arkiver brukeren er medlem av
       responses:
         '200':
-          description: En liste med arkiv-objekter (navn og eier).
+          description: "En liste over brukerens arkiver."
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/ArchiveInfo'
-        '500':
-          description: Intern serverfeil ved henting av arkiver.
-      security: [] # Ingen sikkerhet, dette er et offentlig endepunkt.
+                $ref: '#/components/schemas/ArchiveList'
+        '401': { description: "Ugyldig eller manglende token." }
 
-  /create_archive:
+  /archives/{archive_name}/members:
     post:
-      summary: Opprett nytt arkiv med en eier
+      tags: [Arkivhåndtering]
+      summary: Legg til en bruker i et arkiv
+      description: Kun eieren av arkivet kan utføre denne handlingen.
       parameters:
-        - in: header
-          name: Owner-Email
+        - name: archive_name
+          in: path
           required: true
-          schema:
-            type: string
-            format: email
-          description: En gyldig e-postadresse for arkivets eier.
-      responses:
-        '200':
-          description: Arkiv opprettet.
-        '400':
-          description: Manglende eller ugyldig header (Archive, Password, eller Owner-Email).
-        '401':
-          description: Uautorisert. Manglende eller ugyldig server-token.
-        '409':
-          description: Et arkiv med dette navnet finnes allerede.
-
-  /documents:
-    get:
-      summary: List alle dokumenter i arkivet
-      parameters:
-        - in: query
-          name: sincetimestamp
-          required: false
-          schema:
-            type: string
-            format: date-time
-          description: Valgfritt. Returnerer kun dokumenter hvor 'lastupdated' er nyere enn dette tidspunktet (minus 3 sek). Bruker ISO 8601 format.
-      responses:
-        '200':
-          description: Liste av dokumenter. Kan være filtrert.
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/Document'
-        '400':
-          description: Ugyldig format på 'sincetimestamp'.
-        '401':
-          description: Uautorisert. Manglende eller ugyldig server-token.
-        '403':
-          description: Feil arkiv/passord.
-
-  /rename_document:
-    post:
-      summary: Gi et dokument et nytt navn
-      description: Endrer navnet på et dokument og oppdaterer alle referanser til det i databasen.
+          schema: { type: string }
+          description: Navnet på arkivet.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/RenameDocumentRequest'
+              $ref: '#/components/schemas/MemberAdd'
       responses:
-        '200':
-          description: Navneendring var vellykket.
-        '400':
-          description: Ugyldig input i request body.
-        '401':
-          description: Uautorisert. Manglende eller ugyldig server-token.
-        '403':
-          description: Feil arkiv/passord.
-        '404':
-          description: Dokumentet som skulle endres ble ikke funnet.
-        '409':
-          description: Det nye dokumentnavnet er allerede i bruk.
-        '500':
-          description: En intern feil oppsto. Transaksjonen ble rullet tilbake.
+        '200': { description: "Brukeren ble lagt til." }
+        '401': { description: "Ugyldig eller manglende token." }
+        '403': { description: "Kun eier kan legge til medlemmer." }
+        '404': { description: "Brukeren som skal legges til ble ikke funnet." }
+        '409': { description: "Brukeren er allerede medlem." }
 
+  # --- Dokumenthåndtering ---
   /insert:
     post:
-      summary: Sett inn eller oppdater et dokument
+      tags: [Dokumenthåndtering]
+      summary: Opprett eller oppdater et dokument
+      parameters:
+        - name: Archive
+          in: header
+          required: true
+          schema: { type: string }
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/DocumentRequest'
+              $ref: '#/components/schemas/DocumentInsert'
       responses:
-        '200':
-          description: Dokument opprettet/oppdatert
-        '400':
-          description: Ugyldig input
-        '401':
-          description: Uautorisert. Manglende eller ugyldig server-token.
-        '403':
-          description: Feil arkiv/passord
+        '200': { description: "Dokumentet ble lagret." }
+        '401': { description: "Ugyldig token." }
+        '403': { description: "Mangler skriverettigheter til arkivet." }
 
   /retrieve:
     get:
-      summary: Hent et dokument med full path
+      tags: [Dokumenthåndtering]
+      summary: Hent et spesifikt dokument
       parameters:
-        - in: query
-          name: fullname
+        - name: Archive
+          in: header
           required: true
-          schema:
-            type: string
+          schema: { type: string }
+        - name: fullname
+          in: query
+          required: true
+          schema: { type: string }
+          description: "Fullt navn på dokumentet (inkl. sti)."
       responses:
         '200':
-          description: Dokumentdata
+          description: "Dokumentets innhold."
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Document'
-        '400':
-          description: Manglende parametere
-        '401':
-          description: Uautorisert. Manglende eller ugyldig server-token.
-        '403':
-          description: Feil arkiv/passord
-        '404':
-          description: Dokument ikke funnet
+        '401': { description: "Ugyldig token." }
+        '403': { description: "Mangler leserettigheter til arkivet." }
+        '404': { description: "Dokumentet ble ikke funnet." }
 
-  /delete_document:
-    delete:
-      summary: Slett et dokument
+  /documents:
+    get:
+      tags: [Dokumenthåndtering]
+      summary: List opp alle dokumenter i et arkiv
+      parameters:
+        - name: Archive
+          in: header
+          required: true
+          schema: { type: string }
+        - name: sincetimestamp
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+          description: "Valgfritt. Hent kun dokumenter oppdatert etter dette tidspunktet (ISO 8601)."
+      responses:
+        '200':
+          description: "En liste med metadata for dokumentene."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentSummaryList'
+        '401': { description: "Ugyldig token." }
+        '403': { description: "Mangler leserettigheter til arkivet." }
+
+  /rename_document:
+    post:
+      tags: [Dokumenthåndtering]
+      summary: Endre navn på et dokument (og alle lenker til det)
+      parameters:
+        - name: Archive
+          in: header
+          required: true
+          schema: { type: string }
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/DeleteDocumentRequest'
+              $ref: '#/components/schemas/DocumentRename'
+      responses:
+        '200': { description: "Navneendring var vellykket." }
+        '401': { description: "Ugyldig token." }
+        '403': { description: "Mangler skriverettigheter til arkivet." }
+        '404': { description: "Det gamle dokumentet ble ikke funnet." }
+        '409': { description: "Det nye navnet er allerede i bruk." }
+
+  /graph:
+    get:
+      tags: [Dokumenthåndtering]
+      summary: Hent graf-data for et arkiv
+      description: Returnerer alle dokumenter (noder) og lenker mellom dem (kanter).
+      parameters:
+        - name: Archive
+          in: header
+          required: true
+          schema: { type: string }
       responses:
         '200':
-          description: Sletting utført
-        '400':
-          description: Ugyldig input
-        '401':
-          description: Uautorisert. Manglende eller ugyldig server-token.
-        '403':
-          description: Feil arkiv/passord
+          description: "Noder og kanter for arkivet."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Graph'
+        '401': { description: "Ugyldig token." }
+        '403': { description: "Mangler leserettigheter til arkivet." }
