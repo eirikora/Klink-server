@@ -65,6 +65,15 @@ def init_db():
                             FOREIGN KEY (archive_name) REFERENCES archives (name) ON DELETE CASCADE,
                             FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
                           )''')
+        
+        # --- NYTT: Tabell for invitasjoner ---
+        cursor.execute('''CREATE TABLE IF NOT EXISTS invitations (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            email TEXT NOT NULL,
+                            archive_name TEXT NOT NULL,
+                            role TEXT NOT NULL,
+                            UNIQUE(email, archive_name)
+                          )''')
 
         # 4. Dokumenttabell (som før, men `updatedby` vil nå være en user_id)
         cursor.execute('''CREATE TABLE IF NOT EXISTS documents (
@@ -185,7 +194,7 @@ def register_user():
     data = request.json
     email = data.get('email')
     password = data.get('password')
-    display_name = data.get('displayName', email) # Bruk e-post som default visningsnavn
+    display_name = data.get('displayName', email)
 
     if not email or not password or not EMAIL_REGEX.match(email):
         return jsonify({'error': 'Valid email and password are required'}), 400
@@ -193,11 +202,35 @@ def register_user():
     hashed_password = generate_password_hash(password)
     try:
         with get_db_connection() as conn:
+            # Opprett brukeren
             user_id = conn.execute(
                 "INSERT INTO users (email, password_hash, display_name) VALUES (?, ?, ?)",
                 (email, hashed_password, display_name)
             ).lastrowid
-        
+            
+            # 1. Sjekk om det finnes ventende invitasjoner for denne e-posten
+            invitations = conn.execute(
+                "SELECT archive_name, role FROM invitations WHERE email = ?", (email,)
+            ).fetchall()
+
+            if invitations:
+                logging.info(f"Found {len(invitations)} pending invitation(s) for {email}.")
+                for inv in invitations:
+                    # 2. Legg til brukeren som medlem i arkivet
+                    try:
+                        conn.execute(
+                            "INSERT INTO archive_members (archive_name, user_id, role) VALUES (?, ?, ?)",
+                            (inv['archive_name'], user_id, inv['role'])
+                        )
+                        log_operation('accept_invitation', {'user_id': user_id, 'archive': inv['archive_name']})
+                    except sqlite3.IntegrityError:
+                        # Skjer hvis brukeren mot formodning allerede var medlem. Trygt å ignorere.
+                        pass
+                
+                # 3. Slett invitasjonene som nå er brukt
+                conn.execute("DELETE FROM invitations WHERE email = ?", (email,))
+                logging.info(f"Processed and deleted invitations for {email}.")
+
         log_operation('register_user', {'id': user_id, 'email': email, 'display_name': display_name})
         logging.info(f"User registered successfully: {email}")
         return jsonify({'message': 'User registered successfully'}), 201
@@ -264,24 +297,39 @@ def create_archive():
         return jsonify({'error': 'Could not create archive'}), 500
 
 @app.route('/list_archives', methods=['GET'])
-@jwt_required # <-- Krever nå gyldig login
+@jwt_required
 def list_archives():
-    """Returnerer en liste over arkiver som den påloggede brukeren er medlem av."""
+    """
+    Returnerer en liste over arkiver som den påloggede brukeren er medlem av,
+    inkludert brukerens rolle i hvert arkiv.
+    """
     user_id = g.current_user['id']
     try:
         with get_db_connection() as conn:
-            # Hent arkiver brukeren er medlem i, og join for å få eierens e-post
+            # Hent arkiver, eier-epost OG brukerens rolle
             archives = conn.execute("""
-                SELECT a.name, u.email as owner_email
-                FROM archives a
-                JOIN archive_members am ON a.name = am.archive_name
-                JOIN users u ON a.owner_id = u.id
-                WHERE am.user_id = ?
-                ORDER BY a.name
+                SELECT
+                    a.name,
+                    u.email as owner_email,
+                    am.role
+                FROM
+                    archives a
+                JOIN
+                    archive_members am ON a.name = am.archive_name
+                JOIN
+                    users u ON a.owner_id = u.id
+                WHERE
+                    am.user_id = ?
+                ORDER BY
+                    a.name
             """, (user_id,)).fetchall()
-            
-        archive_list = [{'name': row['name'], 'owner': row['owner_email']} for row in archives]
-        return jsonify(archive_list)
+
+            # Bygg listen og inkluder 'role' i hvert objekt
+            archive_list = [
+                {'name': row['name'], 'owner': row['owner_email'], 'role': row['role']}
+                for row in archives
+            ]
+            return jsonify(archive_list)
 
     except Exception as e:
         logging.error(f"Error fetching archives for user {user_id}: {e}")
@@ -292,36 +340,48 @@ def list_archives():
 @app.route('/archives/<string:archive_name>/members', methods=['POST'])
 @jwt_required
 def add_member(archive_name):
-    # Sjekk om pålogget bruker er eier av arkivet
-    if not check_user_access(g.current_user['id'], archive_name, allowed_roles=['owner']):
-        return jsonify({'error': 'Forbidden: Only the archive owner can add members'}), 403
+    # Sjekk om pålogget bruker er eier ELLER redaktør av arkivet
+    if not check_user_access(g.current_user['id'], archive_name, allowed_roles=('owner', 'editor')):
+        return jsonify({'error': 'Forbidden: You must be an owner or editor to add members'}), 403
 
     data = request.json
     email_to_add = data.get('email')
     role = data.get('role', 'editor')
 
     if not email_to_add or role not in ['editor', 'viewer']:
-        return jsonify({'error': 'Valid email and role (\'editor\' or \'viewer\') are required'}), 400
+        return jsonify({'error': "Valid email and role ('editor' or 'viewer') are required"}), 400
 
     with get_db_connection() as conn:
-        # Finn brukeren som skal legges til
+        # Sjekk om brukeren allerede finnes i systemet
         user_to_add = conn.execute("SELECT id FROM users WHERE email = ?", (email_to_add,)).fetchone()
-        if not user_to_add:
-            return jsonify({'error': f'User with email {email_to_add} not found'}), 404
-        
-        user_id_to_add = user_to_add['id']
-        
-        try:
+
+        if user_to_add:
+            # BRUKER FINNES: Legg dem direkte til som medlem (eller oppdater rolle)
+            user_id_to_add = user_to_add['id']
             conn.execute(
-                "INSERT INTO archive_members (archive_name, user_id, role) VALUES (?, ?, ?)",
+                """
+                INSERT INTO archive_members (archive_name, user_id, role)
+                VALUES (?, ?, ?)
+                ON CONFLICT(archive_name, user_id) DO UPDATE SET role=excluded.role
+                """,
                 (archive_name, user_id_to_add, role)
             )
-            log_operation('add_member', {'archive': archive_name, 'user_id': user_id_to_add, 'role': role})
-            logging.info(f"User ID {user_id_to_add} added to archive '{archive_name}' with role '{role}'")
-            return jsonify({'message': f'User {email_to_add} added to archive'}), 200
-
-        except sqlite3.IntegrityError:
-            return jsonify({'error': f'User {email_to_add} is already a member of this archive'}), 409
+            log_operation('add_or_update_member', {'archive': archive_name, 'user_id': user_id_to_add, 'role': role})
+            logging.info(f"User ID {user_id_to_add} added or updated in archive '{archive_name}' with role '{role}'")
+            return jsonify({'message': f'Access for {email_to_add} has been set to {role}.'}), 200
+        else:
+            # BRUKER FINNES IKKE: Opprett eller oppdater en invitasjon
+            conn.execute(
+                """
+                INSERT INTO invitations (email, archive_name, role)
+                VALUES (?, ?, ?)
+                ON CONFLICT(email, archive_name) DO UPDATE SET role=excluded.role
+                """,
+                (email_to_add, archive_name, role)
+            )
+            log_operation('create_or_update_invitation', {'archive': archive_name, 'email': email_to_add, 'role': role})
+            logging.info(f"Invitation for {email_to_add} to join archive '{archive_name}' created or updated to role '{role}'")
+            return jsonify({'message': f'An invitation for {email_to_add} has been created or updated with {role} access.'}), 200
 
 # --- ENDRET: Alle dokument-endepunkter bruker nå JWT og tilgangssjekk ---
 @app.route('/insert', methods=['POST'])
